@@ -1,4 +1,4 @@
-import { Velr, type VectorEmbedder } from "velr";
+import { Velr, type VectorEmbedder } from "@velr-ai/velr";
 
 function toyVector(text: string, dimensions: number): Float32Array {
   const out = new Float32Array(dimensions);

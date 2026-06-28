@@ -1,8 +1,8 @@
 /**
  * JavaScript and TypeScript bindings for Velr.
  *
- * The root module exports the synchronous driver. Import `velr/worker` for the
- * worker-thread async driver with the same high-level API shape.
+ * The root module exports the synchronous driver. Import `@velr-ai/velr/worker`
+ * for the worker-thread async driver with the same high-level API shape.
  *
  * @packageDocumentation
  */

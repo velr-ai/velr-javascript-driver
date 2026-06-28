@@ -1,7 +1,7 @@
 /**
  * Worker-thread async driver for Velr.
  *
- * This module mirrors the root `velr` driver API while moving native execution
+ * This module mirrors the root `@velr-ai/velr` driver API while moving native execution
  * onto a Node.js worker thread.
  *
  * @packageDocumentation
@@ -256,7 +256,7 @@ function traceFromRef(rpc: WorkerRpc, ref: WorkerHandleRef): VelrWorkerExplainTr
  * Import from the worker subpath:
  *
  * ```ts
- * import { VelrWorker } from "velr/worker";
+ * import { VelrWorker } from "@velr-ai/velr/worker";
  * ```
  *
  * The worker API mirrors the direct `Velr` API, but methods return promises and

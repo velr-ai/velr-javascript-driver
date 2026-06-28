@@ -209,11 +209,11 @@ export class Cell {
  * Import from the main package:
  *
  * ```ts
- * import { Velr } from "velr";
+ * import { Velr } from "@velr-ai/velr";
  * ```
  *
  * The direct driver calls the native library on the current Node.js thread. Use
- * `VelrWorker` from `velr/worker` when query execution should run in a worker
+ * `VelrWorker` from `@velr-ai/velr/worker` when query execution should run in a worker
  * thread.
  */
 export class Velr implements ParentHandle {

@@ -44,6 +44,8 @@ const RUNTIME_PACKAGES = [
   }
 ];
 
+const DRIVER_PACKAGE_NAME = "@velr-ai/velr";
+
 function parseArgs(argv) {
   const args = new Map();
   for (let i = 0; i < argv.length; i += 1) {
@@ -80,9 +82,25 @@ function assertFile(path) {
   if (!existsSync(path)) throw new Error(`missing required file: ${path}`);
 }
 
+function runtimeLockPackage(runtime, version) {
+  const entry = {
+    version,
+    license: "LicenseRef-Velr-Runtime-Binary-Redistribution-License",
+    optional: true,
+    os: runtime.os,
+    cpu: runtime.cpu,
+    engines: {
+      node: ">=22"
+    }
+  };
+  if (runtime.libc) entry.libc = runtime.libc;
+  return entry;
+}
+
 function patchDriverPackage(root, version, publicRepo) {
   const packagePath = join(root, "package.json");
   const pkg = readJson(packagePath);
+  pkg.name = DRIVER_PACKAGE_NAME;
   pkg.version = version;
   pkg.license = "MIT";
   pkg.repository = {
@@ -100,11 +118,16 @@ function patchDriverPackage(root, version, publicRepo) {
   const lockPath = join(root, "package-lock.json");
   if (!existsSync(lockPath)) return;
   const lock = readJson(lockPath);
+  lock.name = DRIVER_PACKAGE_NAME;
   lock.version = version;
   if (lock.packages?.[""]) {
+    lock.packages[""].name = DRIVER_PACKAGE_NAME;
     lock.packages[""].version = version;
     lock.packages[""].license = "MIT";
     lock.packages[""].optionalDependencies = pkg.optionalDependencies;
+    for (const runtime of RUNTIME_PACKAGES) {
+      lock.packages[`node_modules/${runtime.name}`] = runtimeLockPackage(runtime, version);
+    }
   }
   writeJson(lockPath, lock);
 }

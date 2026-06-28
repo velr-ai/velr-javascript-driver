@@ -63,7 +63,7 @@ Fulltext search and vector search are available today through Cypher DDL and
 Install from npm:
 
 ```bash
-npm install velr
+npm install @velr-ai/velr
 ```
 
 The npm package selects a bundled native runtime for supported platforms during
@@ -88,7 +88,7 @@ npm install apache-arrow
 ## Quick start
 
 ```ts
-import { Velr } from "velr";
+import { Velr } from "@velr-ai/velr";
 
 const MOVIES_CREATE = `
 CREATE
@@ -119,7 +119,7 @@ try {
 Open a file-backed database instead of an in-memory database:
 
 ```ts
-import { Velr } from "velr";
+import { Velr } from "@velr-ai/velr";
 
 using db = Velr.open("mygraph.db");
 db.run("CREATE (:Person {name:'Alice'})");
@@ -128,7 +128,7 @@ db.run("CREATE (:Person {name:'Alice'})");
 Open an existing database for reads only:
 
 ```ts
-import { Velr } from "velr";
+import { Velr } from "@velr-ai/velr";
 
 using db = Velr.openReadonly("mygraph.db");
 const rows = db.query("MATCH (n) RETURN count(n) AS count", { int64: "number" });
@@ -152,7 +152,7 @@ intend to update the on-disk schema. See the release-status note above for the
 schema version 7 read/write compatibility behavior.
 
 ```ts
-import { Velr } from "velr";
+import { Velr } from "@velr-ai/velr";
 
 using db = Velr.open("mygraph.db");
 
@@ -577,7 +577,7 @@ The IPC buffer is borrowed only for the duration of the call.
 Register an embedding callback, then reference it from `CREATE VECTOR INDEX`.
 
 ```ts
-import { Velr, type VectorEmbedder } from "velr";
+import { Velr, type VectorEmbedder } from "@velr-ai/velr";
 
 const toyEmbedder: VectorEmbedder = (inputs) =>
   inputs.map((input) => {
@@ -615,12 +615,12 @@ runs off the main thread.
 
 ## Worker threads
 
-The core API is synchronous. Use `velr/worker` to keep synchronous database work
+The core API is synchronous. Use `@velr-ai/velr/worker` to keep synchronous database work
 off the main thread. The worker API mirrors the main driver, but methods that
 touch the database are async and handle iteration uses `for await`.
 
 ```ts
-import { VelrWorker } from "velr/worker";
+import { VelrWorker } from "@velr-ai/velr/worker";
 
 const db = await VelrWorker.open("graph.db");
 try {
@@ -776,7 +776,7 @@ The following openCypher functions and constructors are available:
 The direct `Velr` driver is synchronous and intended to be used from one Node.js
 thread at a time.
 
-Use `VelrWorker` from `velr/worker` when you want database work to run on a
+Use `VelrWorker` from `@velr-ai/velr/worker` when you want database work to run on a
 worker thread and expose an async API to the main thread.
 
 ---
@@ -787,7 +787,7 @@ This package installs or resolves a bundled native runtime for the current
 platform so user installation stays:
 
 ```bash
-npm install velr
+npm install @velr-ai/velr
 ```
 
 Currently targeted bundled platforms:

@@ -1,5 +1,5 @@
 {
-  "name": "velr",
+  "name": "@velr-ai/velr",
   "version": "0.2.29",
   "description": "JavaScript and TypeScript bindings for Velr, an embedded openCypher graph database built on SQLite",
   "license": "MIT",

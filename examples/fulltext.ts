@@ -1,4 +1,4 @@
-import { Velr } from "velr";
+import { Velr } from "@velr-ai/velr";
 
 using db = Velr.open("fulltext.velr");
 
