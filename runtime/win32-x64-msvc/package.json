@@ -1,0 +1,31 @@
+{
+  "name": "@velr-ai/runtime-win32-x64-msvc",
+  "version": "0.2.29",
+  "description": "Velr native runtime for Windows x64 MSVC",
+  "license": "LicenseRef-Velr-Runtime-Binary-Redistribution-License",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/velr-ai/velr-javascript-driver.git",
+    "directory": "runtime/win32-x64-msvc"
+  },
+  "bugs": {
+    "url": "https://github.com/velr-ai/velr-javascript-driver/issues"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "prebuilt",
+    "README.md",
+    "LICENSE.runtime"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

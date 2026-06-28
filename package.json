@@ -1,0 +1,84 @@
+{
+  "name": "velr",
+  "version": "0.2.29",
+  "description": "JavaScript and TypeScript bindings for Velr, an embedded openCypher graph database built on SQLite",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./worker": {
+      "types": "./dist/worker/index.d.ts",
+      "import": "./dist/worker/index.js",
+      "require": "./dist/worker/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "LICENSE.runtime"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsup",
+    "clean": "rimraf dist",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "koffi": ">=2.11.0 <4"
+  },
+  "peerDependencies": {
+    "apache-arrow": ">=15"
+  },
+  "peerDependenciesMeta": {
+    "apache-arrow": {
+      "optional": true
+    }
+  },
+  "optionalDependencies": {
+    "@velr-ai/runtime-darwin-universal": "0.2.29",
+    "@velr-ai/runtime-linux-x64-gnu": "0.2.29",
+    "@velr-ai/runtime-linux-arm64-gnu": "0.2.29",
+    "@velr-ai/runtime-win32-x64-msvc": "0.2.29"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "rimraf": "^6.0.1",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "keywords": [
+    "arrow",
+    "cypher",
+    "database",
+    "embedded",
+    "fulltext",
+    "graph",
+    "opencypher",
+    "sqlite",
+    "typescript",
+    "vector"
+  ],
+  "homepage": "https://velr.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/velr-ai/velr-javascript-driver.git"
+  },
+  "bugs": {
+    "url": "https://github.com/velr-ai/velr-javascript-driver/issues"
+  }
+}
