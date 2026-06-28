@@ -1,0 +1,174 @@
+name: npm-publish
+
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run publish dry-runs without publishing to npm"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout public repo
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Use npm with trusted publishing support
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm install -g npm@latest
+          npm --version
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm ci --omit=optional
+          node scripts/install-rollup-native-optional.mjs
+
+      - name: Verify package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm run typecheck
+          npm run build
+          VELR_NATIVE_LIBRARY="$PWD/runtime/linux-x64-gnu/prebuilt/libvelrc.so" \
+            VELR_JS_NATIVE_TESTS=1 \
+            VELR_JS_NATIVE_FEATURE_TESTS=1 \
+            npm test
+
+      - name: Guard public repo contents
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if find . \
+            -path './.git' -prune -o \
+            -path './node_modules' -prune -o \
+            -path './runtime/*/prebuilt/*' -prune -o \
+            \( \
+              -name '*.rs' -o \
+              -name 'Cargo.toml' -o \
+              -name 'Cargo.lock' -o \
+              -name 'build.rs' -o \
+              -name '*.rlib' -o \
+              -name '*.rmeta' -o \
+              -name '*.a' \
+            \) -print -quit | grep -q .; then
+            echo "ERROR: public JS repo contains Rust/Cargo/private engine artifacts outside runtime binaries:"
+            find . \
+              -path './.git' -prune -o \
+              -path './node_modules' -prune -o \
+              -path './runtime/*/prebuilt/*' -prune -o \
+              \( \
+                -name '*.rs' -o \
+                -name 'Cargo.toml' -o \
+                -name 'Cargo.lock' -o \
+                -name 'build.rs' -o \
+                -name '*.rlib' -o \
+                -name '*.rmeta' -o \
+                -name '*.a' \
+              \) -print
+            exit 1
+          fi
+
+          for dir in runtime/darwin-universal runtime/linux-x64-gnu runtime/linux-arm64-gnu runtime/win32-x64-msvc; do
+            find "$dir" -type f | sort > /tmp/velr-runtime-files.txt
+            case "$dir" in
+              runtime/darwin-universal)
+                expected="$(printf '%s\n' LICENSE.runtime README.md package.json prebuilt/libvelrc.dylib)"
+                ;;
+              runtime/linux-x64-gnu|runtime/linux-arm64-gnu)
+                expected="$(printf '%s\n' LICENSE.runtime README.md package.json prebuilt/libvelrc.so)"
+                ;;
+              runtime/win32-x64-msvc)
+                expected="$(printf '%s\n' LICENSE.runtime README.md package.json prebuilt/velrc.dll)"
+                ;;
+            esac
+            sed "s#^$dir/##" /tmp/velr-runtime-files.txt > /tmp/velr-runtime-relfiles.txt
+            if ! diff -u <(printf '%s\n' "$expected" | sort) /tmp/velr-runtime-relfiles.txt; then
+              echo "ERROR: unexpected files in $dir"
+              exit 1
+            fi
+          done
+
+      - name: Verify npm package contents
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm pack --dry-run --json > /tmp/velr-npm-pack.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          pack = json.loads(Path("/tmp/velr-npm-pack.json").read_text())[0]
+          bad = [
+              f["path"]
+              for f in pack["files"]
+              if f["path"].startswith("runtime/")
+              or f["path"].startswith("rust/")
+              or f["path"].endswith(".rs")
+              or f["path"] in {"Cargo.toml", "Cargo.lock", "build.rs"}
+          ]
+          if bad:
+              raise SystemExit("public npm package would include forbidden files:\n" + "\n".join(bad))
+          PY
+          for dir in runtime/darwin-universal runtime/linux-x64-gnu runtime/linux-arm64-gnu runtime/win32-x64-msvc; do
+            (cd "$dir" && npm pack --dry-run --json)
+          done
+
+      - name: Dry run publish runtime npm packages
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for dir in runtime/darwin-universal runtime/linux-x64-gnu runtime/linux-arm64-gnu runtime/win32-x64-msvc; do
+            (cd "$dir" && npm publish --dry-run --access public)
+          done
+
+      - name: Dry run publish JS driver npm package
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        shell: bash
+        run: npm publish --dry-run --access public
+
+      - name: Publish runtime npm packages with trusted publishing
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
+        shell: bash
+        env:
+          # Bootstrap fallback: set this temporarily for the first publish, then revoke/delete it.
+          # Once npm Trusted Publishing is configured, npm uses OIDC from id-token:write.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euxo pipefail
+          for dir in runtime/darwin-universal runtime/linux-x64-gnu runtime/linux-arm64-gnu runtime/win32-x64-msvc; do
+            (cd "$dir" && npm publish --access public)
+          done
+
+      - name: Publish JS driver npm package with trusted publishing
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
+        shell: bash
+        env:
+          # Bootstrap fallback: set this temporarily for the first publish, then revoke/delete it.
+          # Once npm Trusted Publishing is configured, npm uses OIDC from id-token:write.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euxo pipefail
+          sleep 30
+          npm publish --access public
