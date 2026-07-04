@@ -20,8 +20,8 @@ For the Velr website, see [velr.ai](https://velr.ai/).
 
 - **Community and questions:** [GitHub Discussions](https://github.com/velr-ai/velr/discussions)
 - **Bug reports and feature requests:** [GitHub Issues](https://github.com/velr-ai/velr/issues)
-- **JavaScript examples:** [velr-javascript-examples](https://github.com/velr-ai/velr-javascript-examples)
-- **TypeScript examples:** [velr-typescript-examples](https://github.com/velr-ai/velr-typescript-examples)
+- **JavaScript examples:** [velr-ai/velr-javascript-examples](https://github.com/velr-ai/velr-javascript-examples)
+- **TypeScript examples:** [velr-ai/velr-typescript-examples](https://github.com/velr-ai/velr-typescript-examples)
 
 We'd love to have you join the Velr community.
 

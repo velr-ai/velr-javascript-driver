@@ -1,6 +1,6 @@
 {
   "name": "@velr-ai/runtime-darwin-universal",
-  "version": "0.2.29",
+  "version": "0.2.32",
   "description": "Velr native runtime for macOS universal",
   "license": "LicenseRef-Velr-Runtime-Binary-Redistribution-License",
   "repository": {
