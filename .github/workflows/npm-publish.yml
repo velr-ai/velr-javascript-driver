@@ -151,10 +151,6 @@ jobs:
       - name: Publish runtime npm packages with trusted publishing
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
         shell: bash
-        env:
-          # Bootstrap fallback: set this temporarily for the first publish, then revoke/delete it.
-          # Once npm Trusted Publishing is configured, npm uses OIDC from id-token:write.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euxo pipefail
           publish_if_missing() {
@@ -177,10 +173,6 @@ jobs:
       - name: Publish JS driver npm package with trusted publishing
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
         shell: bash
-        env:
-          # Bootstrap fallback: set this temporarily for the first publish, then revoke/delete it.
-          # Once npm Trusted Publishing is configured, npm uses OIDC from id-token:write.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euxo pipefail
           name="$(node -p 'require("./package.json").name')"
