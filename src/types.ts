@@ -80,7 +80,13 @@ export interface MigrationReport {
   readonly steps: readonly string[];
 }
 
-/** Why Velr is requesting embeddings from a registered vector embedder. */
+/**
+ * Why Velr is requesting embeddings from a registered vector embedder.
+ *
+ * This is only used by embedder-backed indexes. Stored-vector indexes, such as
+ * `CREATE VECTOR INDEX ... ON (n.embedding)`, use the vector/list property
+ * directly.
+ */
 export type VectorEmbeddingPurpose = "index_entity" | "query";
 
 /** Entity type being embedded for a vector index. */
@@ -106,7 +112,13 @@ export type VectorPropertyValueType =
   | "vector"
   | "bytes";
 
-/** Single property field passed to a vector embedding callback. */
+/**
+ * Single property field passed to a vector embedding callback.
+ *
+ * Fields are produced for `CREATE VECTOR INDEX ... ON EACH [...]` sources.
+ * Stored-vector indexes created with `ON (n.embedding)` do not call an
+ * embedder.
+ */
 export interface VectorEmbeddingField {
   /** Property name, or `null` for unnamed payloads. */
   readonly name: string | null;
@@ -120,7 +132,12 @@ export interface VectorEmbeddingField {
   readonly display: string;
 }
 
-/** Batch input passed to a registered vector embedding callback. */
+/**
+ * Batch input passed to a registered vector embedding callback.
+ *
+ * Stored-vector indexes created with `ON (n.embedding)` query with numeric
+ * vectors/lists instead of producing embedder inputs.
+ */
 export interface VectorEmbeddingInput {
   /** Vector index name that requested the embedding. */
   readonly indexName: string;
@@ -144,10 +161,12 @@ export interface VectorEmbeddingInput {
 export type VectorEmbedding = readonly number[] | Float32Array;
 
 /**
- * Synchronous vector embedding callback used by the direct driver.
+ * Synchronous vector embedding callback used by the direct driver for
+ * embedder-backed vector indexes.
  *
  * Return one embedding for each input in the same order. The worker driver uses
  * `VelrWorkerVectorEmbedder`, which may return a promise.
+ * Stored-vector indexes do not call this callback.
  */
 export type VectorEmbedder = (
   inputs: readonly VectorEmbeddingInput[]

@@ -203,6 +203,9 @@ function dispatch(op: string, payload: any): unknown {
       return requireDb().needsMigration();
     case "db.migrate":
       return requireDb().migrate();
+    case "db.vacuum":
+      requireDb().vacuum();
+      return null;
     case "db.registerVectorEmbedderBridge":
       requireDb().registerVectorEmbedder(payload.name, bridgeEmbedder(payload.embedderId));
       return null;

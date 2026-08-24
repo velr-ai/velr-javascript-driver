@@ -31,11 +31,12 @@ export interface VelrWorkerOptions {
 }
 
 /**
- * Vector embedding callback used by `VelrWorker`.
+ * Vector embedding callback used by `VelrWorker` for embedder-backed indexes.
  *
  * Unlike the direct driver's `VectorEmbedder`, the worker embedder may return a
  * promise because the callback runs on the main thread while database execution
  * happens in the worker.
+ * Stored-vector indexes do not call this callback.
  */
 export type VelrWorkerVectorEmbedder = (
   inputs: readonly VectorEmbeddingInput[]
@@ -333,11 +334,27 @@ export class VelrWorker {
     return this.#rpc.call("db.migrate");
   }
 
+  /** Compact a writable, current-schema database file with Velr's maintenance vacuum. */
+  async vacuum(): Promise<void> {
+    await this.#rpc.call("db.vacuum");
+  }
+
   /**
    * Register or replace a vector embedder for worker-side vector indexes.
    *
+   * Embedder-backed vector indexes reference this name from
+   * `CREATE VECTOR INDEX ... OPTIONS { indexConfig: { embedder: 'name' } }`.
    * The callback runs on the parent thread and may be asynchronous. Return one
    * embedding for each input in the same order.
+   *
+   * Stored-vector indexes, such as `CREATE VECTOR INDEX ... ON (n.embedding)`,
+   * index the vector/list property directly and do not use a registered
+   * embedder.
+   *
+   * Common vector `indexConfig` keys are `dimensions` / `` `vector.dimensions` ``,
+   * `metric` / `` `vector.similarity_function` ``, `embedder`,
+   * `` `vector.hnsw.m` `` (`1..512`), `` `vector.hnsw.ef_construction` ``
+   * (`1..3200`), and `` `vector.hnsw.ef_search` `` (`1..3200`).
    */
   async registerVectorEmbedder(name: string, embedder: VelrWorkerVectorEmbedder): Promise<void> {
     if (typeof name !== "string") throw new VelrTypeError("vector embedder name must be a string");

@@ -61,6 +61,12 @@ interface NativeLib {
   ) => number;
   readonly velr_query_params_new: () => NativePointer;
   readonly velr_query_params_free: (params: NativePointer) => void;
+  readonly velr_query_param_row_map_required_columns: (
+    cypher: StrView,
+    paramName: StrView,
+    outJson: NativePointer[],
+    outErr: NativePointer[]
+  ) => number;
   readonly velr_query_params_set_null: (
     params: NativePointer,
     name: StrView,
@@ -96,6 +102,72 @@ interface NativeLib {
     json: StrView,
     outErr: NativePointer[]
   ) => number;
+  readonly velr_query_params_set_row_maps: (
+    params: NativePointer,
+    name: StrView,
+    rowCount: number,
+    entries: Buffer | null,
+    entryCount: number,
+    outErr: NativePointer[]
+  ) => number;
+  readonly velr_query_params_set_row_map_columns: (
+    params: NativePointer,
+    name: StrView,
+    rowCount: number,
+    colnames: Buffer | null,
+    colCount: number,
+    cells: Buffer | null,
+    present: Buffer | null,
+    outErr: NativePointer[]
+  ) => number;
+  readonly velr_query_params_set_row_map_packed_columns: (
+    params: NativePointer,
+    name: StrView,
+    rowCount: number,
+    colnames: Buffer | null,
+    colCount: number,
+    cellTypes: Buffer | null,
+    i64Values: Buffer | null,
+    f64Values: Buffer | null,
+    bytesOffsets: Buffer | null,
+    bytesLens: Buffer | null,
+    bytes: Buffer | null,
+    bytesLen: number,
+    present: Buffer | null,
+    outErr: NativePointer[]
+  ) => number;
+  readonly velr_query_params_set_row_map_packed_columns_u32: (
+    params: NativePointer,
+    name: StrView,
+    rowCount: number,
+    colnames: Buffer | null,
+    colCount: number,
+    cellTypes: Buffer | null,
+    i64Values: Buffer | null,
+    f64Values: Buffer | null,
+    bytesOffsets: Buffer | null,
+    bytesLens: Buffer | null,
+    bytes: Buffer | null,
+    bytesLen: number,
+    present: Buffer | null,
+    outErr: NativePointer[]
+  ) => number;
+  readonly velr_query_params_set_row_map_packed_columns_u8_u32: (
+    params: NativePointer,
+    name: StrView,
+    rowCount: number,
+    colnames: Buffer | null,
+    colCount: number,
+    cellTypes: Buffer | null,
+    i64Values: Buffer | null,
+    f64Values: Buffer | null,
+    bytesOffsets: Buffer | null,
+    bytesLens: Buffer | null,
+    bytes: Buffer | null,
+    bytesLen: number,
+    present: Buffer | null,
+    outErr: NativePointer[]
+  ) => number;
   readonly velr_schema_version: (
     db: NativePointer,
     outVersion: number[],
@@ -116,6 +188,7 @@ interface NativeLib {
     outReport: MigrationReportRaw,
     outErr: NativePointer[]
   ) => number;
+  readonly velr_vacuum?: (db: NativePointer, outErr: NativePointer[]) => number;
   readonly velr_migration_report_clear: (report: MigrationReportRaw) => void;
   readonly velr_exec_start: (
     db: NativePointer,
@@ -128,6 +201,17 @@ interface NativeLib {
     cypher: string,
     opts: QueryOptionsRaw,
     outStream: NativePointer[],
+    outErr: NativePointer[]
+  ) => number;
+  readonly velr_run: (
+    db: NativePointer,
+    cypher: string,
+    outErr: NativePointer[]
+  ) => number;
+  readonly velr_run_with_options: (
+    db: NativePointer,
+    cypher: string,
+    opts: QueryOptionsRaw,
     outErr: NativePointer[]
   ) => number;
   readonly velr_exec_one: (
@@ -265,6 +349,17 @@ interface NativeLib {
     outStream: NativePointer[],
     outErr: NativePointer[]
   ) => number;
+  readonly velr_tx_run: (
+    tx: NativePointer,
+    cypher: string,
+    outErr: NativePointer[]
+  ) => number;
+  readonly velr_tx_run_with_options: (
+    tx: NativePointer,
+    cypher: string,
+    opts: QueryOptionsRaw,
+    outErr: NativePointer[]
+  ) => number;
   readonly velr_stream_tx_next_table: (
     stream: NativePointer,
     outTable: NativePointer[],
@@ -318,6 +413,7 @@ export interface NativeBindings {
   readonly resolution: RuntimeResolution;
   readonly types: {
     readonly cell: any;
+    readonly paramMapEntry: any;
     readonly queryOptions: any;
     readonly migrationReport: any;
     readonly explainPlanMeta: any;
@@ -329,11 +425,26 @@ export interface NativeBindings {
     readonly vectorEmbedderCallback: any;
   };
   readonly cellSize: number;
+  readonly paramMapEntrySize: number;
 }
 
 export interface StrView {
   ptr?: Buffer | NativePointer;
   len: number | bigint;
+}
+
+interface CellRaw {
+  ty: number;
+  i64_: bigint;
+  f64_: number;
+  ptr: Buffer | NativePointer;
+  len: number | bigint;
+}
+
+interface ParamMapEntryRaw {
+  row_index: number | bigint;
+  key: StrView;
+  value: CellRaw;
 }
 
 export interface QueryOptionsRaw {
@@ -426,6 +537,12 @@ function createBindings(resolution: RuntimeResolution): NativeBindings {
     len: "size_t"
   });
 
+  const paramMapEntry = koffi.struct("velr_param_map_entry", {
+    row_index: "size_t",
+    key: strView,
+    value: cell
+  });
+
   const queryOptions = koffi.struct("velr_query_options", {
     has_max_result_rows: "int",
     max_result_rows: "size_t",
@@ -510,19 +627,28 @@ function createBindings(resolution: RuntimeResolution): NativeBindings {
     velr_register_vector_embedder: optional("velr_code velr_register_vector_embedder(velr_db *db, velr_strview name, velr_vector_embedder_callback *callback, void *user_data, void *free_user_data, _Out_ void **out_err)"),
     velr_query_params_new: required("velr_query_params *velr_query_params_new(void)"),
     velr_query_params_free: required("void velr_query_params_free(velr_query_params *params)"),
+    velr_query_param_row_map_required_columns: required("velr_code velr_query_param_row_map_required_columns(velr_strview cypher, velr_strview param_name, _Out_ void **out_json, _Out_ void **out_err)"),
     velr_query_params_set_null: required("velr_code velr_query_params_set_null(velr_query_params *params, velr_strview name, _Out_ void **out_err)"),
     velr_query_params_set_bool: required("velr_code velr_query_params_set_bool(velr_query_params *params, velr_strview name, int value, _Out_ void **out_err)"),
     velr_query_params_set_i64: required("velr_code velr_query_params_set_i64(velr_query_params *params, velr_strview name, int64_t value, _Out_ void **out_err)"),
     velr_query_params_set_f64: required("velr_code velr_query_params_set_f64(velr_query_params *params, velr_strview name, double value, _Out_ void **out_err)"),
     velr_query_params_set_text: required("velr_code velr_query_params_set_text(velr_query_params *params, velr_strview name, velr_strview value, _Out_ void **out_err)"),
     velr_query_params_set_json: required("velr_code velr_query_params_set_json(velr_query_params *params, velr_strview name, velr_strview json_value, _Out_ void **out_err)"),
+    velr_query_params_set_row_maps: required("velr_code velr_query_params_set_row_maps(velr_query_params *params, velr_strview name, size_t row_count, const velr_param_map_entry *entries, size_t entry_count, _Out_ void **out_err)"),
+    velr_query_params_set_row_map_columns: required("velr_code velr_query_params_set_row_map_columns(velr_query_params *params, velr_strview name, size_t row_count, const velr_strview *colnames, size_t col_count, const velr_cell *cells, const uint8_t *present, _Out_ void **out_err)"),
+    velr_query_params_set_row_map_packed_columns: required("velr_code velr_query_params_set_row_map_packed_columns(velr_query_params *params, velr_strview name, size_t row_count, const velr_strview *colnames, size_t col_count, const int *cell_types, const int64_t *i64_values, const double *f64_values, const size_t *bytes_offsets, const size_t *bytes_lens, const uint8_t *bytes, size_t bytes_len, const uint8_t *present, _Out_ void **out_err)"),
+    velr_query_params_set_row_map_packed_columns_u32: required("velr_code velr_query_params_set_row_map_packed_columns_u32(velr_query_params *params, velr_strview name, size_t row_count, const velr_strview *colnames, size_t col_count, const int *cell_types, const int64_t *i64_values, const double *f64_values, const uint32_t *bytes_offsets, const uint32_t *bytes_lens, const uint8_t *bytes, size_t bytes_len, const uint8_t *present, _Out_ void **out_err)"),
+    velr_query_params_set_row_map_packed_columns_u8_u32: required("velr_code velr_query_params_set_row_map_packed_columns_u8_u32(velr_query_params *params, velr_strview name, size_t row_count, const velr_strview *colnames, size_t col_count, const uint8_t *cell_types, const int64_t *i64_values, const double *f64_values, const uint32_t *bytes_offsets, const uint32_t *bytes_lens, const uint8_t *bytes, size_t bytes_len, const uint8_t *present, _Out_ void **out_err)"),
     velr_schema_version: required("velr_code velr_schema_version(velr_db *db, _Out_ int32_t *out_version, _Out_ void **out_err)"),
     velr_current_schema_version: required("velr_code velr_current_schema_version(velr_db *db, _Out_ int32_t *out_version, _Out_ void **out_err)"),
     velr_needs_migration: required("velr_code velr_needs_migration(velr_db *db, _Out_ int *out_needs_migration, _Out_ void **out_err)"),
     velr_migrate: required("velr_code velr_migrate(velr_db *db, _Out_ velr_migration_report *out_report, _Out_ void **out_err)"),
+    velr_vacuum: optional("velr_code velr_vacuum(velr_db *db, _Out_ void **out_err)"),
     velr_migration_report_clear: required("void velr_migration_report_clear(_Inout_ velr_migration_report *report)"),
     velr_exec_start: required("velr_code velr_exec_start(velr_db *db, const char *cypher, _Out_ velr_stream **out_stream, _Out_ void **out_err)"),
     velr_exec_start_with_options: optional("velr_code velr_exec_start_with_options(velr_db *db, const char *cypher, const velr_query_options *opts, _Out_ velr_stream **out_stream, _Out_ void **out_err)"),
+    velr_run: required("velr_code velr_run(velr_db *db, const char *cypher, _Out_ void **out_err)"),
+    velr_run_with_options: required("velr_code velr_run_with_options(velr_db *db, const char *cypher, const velr_query_options *opts, _Out_ void **out_err)"),
     velr_exec_one: required("velr_code velr_exec_one(velr_db *db, const char *cypher, _Out_ velr_table **out_table, _Out_ void **out_err)"),
     velr_exec_one_with_options: optional("velr_code velr_exec_one_with_options(velr_db *db, const char *cypher, const velr_query_options *opts, _Out_ velr_table **out_table, _Out_ void **out_err)"),
     velr_stream_next_table: required("velr_code velr_stream_next_table(velr_stream *stream, _Out_ velr_table **out_table, _Out_ int *out_has, _Out_ void **out_err)"),
@@ -553,6 +679,8 @@ function createBindings(resolution: RuntimeResolution): NativeBindings {
     velr_tx_close: required("void velr_tx_close(velr_tx *tx)"),
     velr_tx_exec_start: required("velr_code velr_tx_exec_start(velr_tx *tx, const char *cypher, _Out_ velr_stream_tx **out_stream, _Out_ void **out_err)"),
     velr_tx_exec_start_with_options: optional("velr_code velr_tx_exec_start_with_options(velr_tx *tx, const char *cypher, const velr_query_options *opts, _Out_ velr_stream_tx **out_stream, _Out_ void **out_err)"),
+    velr_tx_run: required("velr_code velr_tx_run(velr_tx *tx, const char *cypher, _Out_ void **out_err)"),
+    velr_tx_run_with_options: required("velr_code velr_tx_run_with_options(velr_tx *tx, const char *cypher, const velr_query_options *opts, _Out_ void **out_err)"),
     velr_stream_tx_next_table: required("velr_code velr_stream_tx_next_table(velr_stream_tx *stream, _Out_ velr_table **out_table, _Out_ int *out_has, _Out_ void **out_err)"),
     velr_exec_tx_close: required("void velr_exec_tx_close(velr_stream_tx *stream)"),
     velr_tx_savepoint: required("velr_code velr_tx_savepoint(velr_tx *tx, _Out_ velr_sp **out_sp, _Out_ void **out_err)"),
@@ -571,6 +699,7 @@ function createBindings(resolution: RuntimeResolution): NativeBindings {
     resolution,
     types: {
       cell,
+      paramMapEntry,
       queryOptions,
       migrationReport,
       explainPlanMeta,
@@ -581,7 +710,8 @@ function createBindings(resolution: RuntimeResolution): NativeBindings {
       vectorEmbeddingInput,
       vectorEmbedderCallback
     },
-    cellSize: koffi.sizeof(cell)
+    cellSize: koffi.sizeof(cell),
+    paramMapEntrySize: koffi.sizeof(paramMapEntry)
   };
 }
 
@@ -704,7 +834,15 @@ export function isNullPointer(ptr: NativePointer | Buffer | undefined): boolean 
   return ptr == null || ptr === 0n;
 }
 
-export function buildQueryParams(params: QueryParams | null | undefined): NativePointer {
+type RowMapColumnHints = ReadonlyMap<string, readonly string[]>;
+
+const ROW_MAP_REQUIRED_COLUMNS_CACHE_MAX = 256;
+const rowMapRequiredColumnsCache = new Map<string, readonly string[] | null>();
+
+export function buildQueryParams(
+  params: QueryParams | null | undefined,
+  rowMapColumnHints?: RowMapColumnHints
+): NativePointer {
   if (params == null) return null;
   if (typeof params !== "object" || Array.isArray(params)) {
     throw new VelrTypeError("query params must be an object");
@@ -716,7 +854,7 @@ export function buildQueryParams(params: QueryParams | null | undefined): Native
 
   try {
     for (const [name, value] of Object.entries(params)) {
-      setQueryParam(handle, name, value);
+      setQueryParam(handle, name, value, rowMapColumnHints?.get(name));
     }
     return handle;
   } catch (err) {
@@ -729,7 +867,12 @@ export function freeQueryParams(handle: NativePointer): void {
   if (!isNullPointer(handle)) getBindings().lib.velr_query_params_free(handle);
 }
 
-function setQueryParam(handle: NativePointer, name: string, value: QueryValue): void {
+function setQueryParam(
+  handle: NativePointer,
+  name: string,
+  value: QueryValue,
+  rowMapColumns?: readonly string[]
+): void {
   validateParamName(name);
   const { lib } = getBindings();
   const nameView = makeStrView(name);
@@ -765,9 +908,592 @@ function setQueryParam(handle: NativePointer, name: string, value: QueryValue): 
     check(lib.velr_query_params_set_text(handle, nameView.view, valueView.view, outErrValue), outErrValue);
     return;
   }
+  if (Array.isArray(value) && value.every(isQueryMap)) {
+    setQueryParamRowMaps(handle, nameView.view, value, rowMapColumns);
+    return;
+  }
 
   const jsonView = makeStrView(queryValueToJson(value, `parameter ${name}`));
   check(lib.velr_query_params_set_json(handle, nameView.view, jsonView.view, outErrValue), outErrValue);
+}
+
+function isQueryMap(value: QueryValue): value is { readonly [key: string]: QueryValue } {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function queryParamRowMapRequiredColumns(cypher: string, paramName: string): readonly string[] | null {
+  const { lib } = getBindings();
+
+  const cacheKey = `${paramName}\0${cypher}`;
+  if (rowMapRequiredColumnsCache.has(cacheKey)) {
+    return rowMapRequiredColumnsCache.get(cacheKey) ?? null;
+  }
+
+  const cypherView = makeStrView(cypher);
+  const paramNameView = makeStrView(paramName);
+  const outJson = outPtr();
+  const outErrValue = outPtr();
+  check(
+    lib.velr_query_param_row_map_required_columns(
+      cypherView.view,
+      paramNameView.view,
+      outJson,
+      outErrValue
+    ),
+    outErrValue
+  );
+
+  let columns: readonly string[] | null = null;
+  if (!isNullPointer(outJson[0])) {
+    try {
+      const decoded = JSON.parse(cStringToString(outJson[0], "row-map required columns"));
+      if (!Array.isArray(decoded) || !decoded.every((value) => typeof value === "string")) {
+        throw new VelrError("row-map required columns did not decode to a string array");
+      }
+      columns = decoded;
+    } finally {
+      lib.velr_string_free(outJson[0]);
+    }
+  }
+
+  rowMapRequiredColumnsCache.set(cacheKey, columns);
+  if (rowMapRequiredColumnsCache.size > ROW_MAP_REQUIRED_COLUMNS_CACHE_MAX) {
+    const firstKey = rowMapRequiredColumnsCache.keys().next().value;
+    if (firstKey !== undefined) rowMapRequiredColumnsCache.delete(firstKey);
+  }
+  return columns;
+}
+
+function setQueryParamRowMaps(
+  handle: NativePointer,
+  name: StrView,
+  rows: readonly { readonly [key: string]: QueryValue }[],
+  projectedColumns?: readonly string[]
+): void {
+  const { lib, types, paramMapEntrySize } = getBindings();
+
+  if (projectedColumns && trySetQueryParamProjectedRowMapColumns(handle, name, rows, projectedColumns)) {
+    return;
+  }
+
+  if (trySetQueryParamDenseRowMapColumns(handle, name, rows)) {
+    return;
+  }
+
+  const columns: string[] = [];
+  let entryCount = 0;
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      entryCount += 1;
+      if (!columns.includes(key)) columns.push(key);
+    }
+  }
+  if (trySetQueryParamRowMapColumns(handle, name, rows, columns, entryCount)) {
+    return;
+  }
+
+  const keepAlive: Buffer[] = [];
+  const entries: ParamMapEntryRaw[] = [];
+  rows.forEach((row, rowIndex) => {
+    for (const [key, value] of Object.entries(row)) {
+      const keyView = makeStrView(key);
+      keepAlive.push(keyView.backing);
+      entries.push({
+        row_index: rowIndex,
+        key: keyView.view,
+        value: queryValueToParamCell(value, keepAlive, null, rowIndex, key)
+      });
+    }
+  });
+
+  const entryBuffer = entries.length === 0 ? null : Buffer.alloc(paramMapEntrySize * entries.length);
+  if (entryBuffer) koffi.encode(entryBuffer, types.paramMapEntry, entries, entries.length);
+
+  const outErrValue = outPtr();
+  check(
+    lib.velr_query_params_set_row_maps(handle, name, rows.length, entryBuffer, entries.length, outErrValue),
+    outErrValue
+  );
+}
+
+function trySetQueryParamProjectedRowMapColumns(
+  handle: NativePointer,
+  name: StrView,
+  rows: readonly { readonly [key: string]: QueryValue }[],
+  columns: readonly string[]
+): boolean {
+  if (trySetQueryParamPackedRowMapColumns(handle, name, rows, columns, true)) {
+    return true;
+  }
+
+  return trySetQueryParamRowMapColumns(handle, name, rows, columns, rows.length * columns.length);
+}
+
+function trySetQueryParamDenseRowMapColumns(
+  handle: NativePointer,
+  name: StrView,
+  rows: readonly { readonly [key: string]: QueryValue }[]
+): boolean {
+  const { lib, types, cellSize } = getBindings();
+
+  const columns = rows.length === 0 ? [] : Object.keys(rows[0]!);
+
+  if (trySetQueryParamPackedRowMapColumns(handle, name, rows, columns, false)) {
+    return true;
+  }
+
+  for (const row of rows) {
+    const keys = Object.keys(row);
+    if (keys.length !== columns.length) return false;
+    for (const column of columns) {
+      if (!Object.prototype.hasOwnProperty.call(row, column)) return false;
+    }
+  }
+
+  const keepAlive: Buffer[] = [];
+  const colViews = columns.map((column) => {
+    const view = makeStrView(column);
+    keepAlive.push(view.backing);
+    return view.view;
+  });
+  const strViewSize = koffi.sizeof(types.strView);
+  const colBuffer = colViews.length === 0 ? null : Buffer.alloc(strViewSize * colViews.length);
+  if (colBuffer) koffi.encode(colBuffer, types.strView, colViews, colViews.length);
+
+  const cells = new Array<CellRaw>(rows.length * columns.length);
+  let cellIndex = 0;
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex]!;
+    for (const column of columns) {
+      cells[cellIndex++] = queryValueToParamCell(row[column], keepAlive, null, rowIndex, column);
+    }
+  }
+
+  const cellBuffer = cells.length === 0 ? null : Buffer.alloc(cellSize * cells.length);
+  if (cellBuffer) koffi.encode(cellBuffer, types.cell, cells, cells.length);
+
+  const outErrValue = outPtr();
+  check(
+    lib.velr_query_params_set_row_map_columns(
+      handle,
+      name,
+      rows.length,
+      colBuffer,
+      columns.length,
+      cellBuffer,
+      null,
+      outErrValue
+    ),
+    outErrValue
+  );
+  return true;
+}
+
+function trySetQueryParamRowMapColumns(
+  handle: NativePointer,
+  name: StrView,
+  rows: readonly { readonly [key: string]: QueryValue }[],
+  columns: readonly string[],
+  entryCount: number
+): boolean {
+  const { lib, types, cellSize } = getBindings();
+
+  const totalCells = rows.length * columns.length;
+  if (totalCells > entryCount * 2) return false;
+
+  if (trySetQueryParamPackedRowMapColumns(handle, name, rows, columns, true)) {
+    return true;
+  }
+
+  const keepAlive: Buffer[] = [];
+  const colViews = columns.map((column) => {
+    const view = makeStrView(column);
+    keepAlive.push(view.backing);
+    return view.view;
+  });
+  const strViewSize = koffi.sizeof(types.strView);
+  const colBuffer = colViews.length === 0 ? null : Buffer.alloc(strViewSize * colViews.length);
+  if (colBuffer) koffi.encode(colBuffer, types.strView, colViews, colViews.length);
+
+  const cells = new Array<CellRaw>(totalCells);
+  const present = Buffer.alloc(totalCells);
+  let allPresent = true;
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex]!;
+    for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
+      const column = columns[columnIndex]!;
+      const cellIndex = rowIndex * columns.length + columnIndex;
+      if (Object.prototype.hasOwnProperty.call(row, column)) {
+        present[cellIndex] = 1;
+        cells[cellIndex] = queryValueToParamCell(row[column], keepAlive, null, rowIndex, column);
+      } else {
+        allPresent = false;
+        cells[cellIndex] = nullParamCell();
+      }
+    }
+  }
+
+  const cellBuffer = cells.length === 0 ? null : Buffer.alloc(cellSize * cells.length);
+  if (cellBuffer) koffi.encode(cellBuffer, types.cell, cells, cells.length);
+
+  const outErrValue = outPtr();
+  check(
+    lib.velr_query_params_set_row_map_columns(
+      handle,
+      name,
+      rows.length,
+      colBuffer,
+      columns.length,
+      cellBuffer,
+      allPresent ? null : present,
+      outErrValue
+    ),
+    outErrValue
+  );
+  return true;
+}
+
+function trySetQueryParamPackedRowMapColumns(
+  handle: NativePointer,
+  name: StrView,
+  rows: readonly { readonly [key: string]: QueryValue }[],
+  columns: readonly string[],
+  preserveMissing: boolean
+): boolean {
+  const result = trySetQueryParamPackedRowMapColumnsWithLayout(
+    handle,
+    name,
+    rows,
+    columns,
+    preserveMissing,
+    "u8_u32"
+  );
+  if (result === "set") return true;
+  if (result === "shape-mismatch") return false;
+  return (
+    trySetQueryParamPackedRowMapColumnsWithLayout(
+      handle,
+      name,
+      rows,
+      columns,
+      preserveMissing,
+      "usize"
+    ) === "set"
+  );
+}
+
+type PackedLayout = "u8_u32" | "u32" | "usize";
+type PackedOffsetWidth = "u32" | "usize";
+type PackedRowMapSetResult = "set" | "shape-mismatch" | "offset-overflow";
+const PACKED_U32_MAX = 0xffffffff;
+const PACKED_BYTES_MIN_INITIAL_CAPACITY = 1024;
+const PACKED_BYTES_MAX_INITIAL_CAPACITY = 1024 * 1024;
+const PACKED_BYTES_CELL_CAPACITY_HINT = 32;
+
+function trySetQueryParamPackedRowMapColumnsWithLayout(
+  handle: NativePointer,
+  name: StrView,
+  rows: readonly { readonly [key: string]: QueryValue }[],
+  columns: readonly string[],
+  preserveMissing: boolean,
+  layout: PackedLayout
+): PackedRowMapSetResult {
+  const { lib, types } = getBindings();
+  const compactCellTypes = layout === "u8_u32";
+  const offsetWidth: PackedOffsetWidth = layout === "usize" ? "usize" : "u32";
+  const setPackedRowMapColumns =
+    layout === "u8_u32"
+      ? lib.velr_query_params_set_row_map_packed_columns_u8_u32
+      : layout === "u32"
+      ? lib.velr_query_params_set_row_map_packed_columns_u32
+      : lib.velr_query_params_set_row_map_packed_columns;
+
+  const keepAlive: Buffer[] = [];
+  const colViews = columns.map((column) => {
+    const view = makeStrView(column);
+    keepAlive.push(view.backing);
+    return view.view;
+  });
+  const strViewSize = koffi.sizeof(types.strView);
+  const colBuffer = colViews.length === 0 ? null : Buffer.alloc(strViewSize * colViews.length);
+  if (colBuffer) koffi.encode(colBuffer, types.strView, colViews, colViews.length);
+
+  const totalCells = rows.length * columns.length;
+  const offsetStride = offsetWidth === "u32" ? 4 : 8;
+  const cellTypeStride = compactCellTypes ? 1 : 4;
+  const cellTypes = totalCells === 0 ? null : Buffer.allocUnsafe(cellTypeStride * totalCells);
+  const i64Values = totalCells === 0 ? null : Buffer.allocUnsafe(8 * totalCells);
+  const f64Values = totalCells === 0 ? null : Buffer.allocUnsafe(8 * totalCells);
+  const bytesOffsets = totalCells === 0 ? null : Buffer.allocUnsafe(offsetStride * totalCells);
+  const bytesLens = totalCells === 0 ? null : Buffer.allocUnsafe(offsetStride * totalCells);
+  const present = preserveMissing && totalCells > 0 ? Buffer.alloc(totalCells) : null;
+  const bytesWriter = new PackedBytesWriter(packedBytesInitialCapacity(totalCells));
+
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex]!;
+    if (!preserveMissing && Object.keys(row).length !== columns.length) {
+      return "shape-mismatch";
+    }
+    for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
+      const column = columns[columnIndex]!;
+      const cellIndex = rowIndex * columns.length + columnIndex;
+      if (preserveMissing && !Object.prototype.hasOwnProperty.call(row, column)) {
+        writePackedCellType(cellTypes!, cellIndex, CellKind.Null, compactCellTypes);
+        continue;
+      }
+      if (!Object.prototype.hasOwnProperty.call(row, column)) {
+        return "shape-mismatch";
+      }
+      if (present) present[cellIndex] = 1;
+      if (!writePackedParamCell(
+        row[column],
+        cellIndex,
+        cellTypes!,
+        i64Values!,
+        f64Values!,
+        bytesOffsets!,
+        bytesLens!,
+        bytesWriter,
+        null,
+        rowIndex,
+        column,
+        offsetWidth,
+        compactCellTypes
+      )) {
+        return "offset-overflow";
+      }
+    }
+  }
+
+  const bytes = bytesWriter.toBuffer();
+  const outErrValue = outPtr();
+  check(
+    setPackedRowMapColumns(
+      handle,
+      name,
+      rows.length,
+      colBuffer,
+      columns.length,
+      cellTypes,
+      i64Values,
+      f64Values,
+      bytesOffsets,
+      bytesLens,
+      bytes,
+      bytesWriter.length,
+      present,
+      outErrValue
+    ),
+    outErrValue
+  );
+  return "set";
+}
+
+function nullParamCell(): CellRaw {
+  return { ty: CellKind.Null, i64_: 0n, f64_: 0, ptr: null, len: 0 };
+}
+
+class PackedBytesWriter {
+  private buffer: Buffer;
+  public length = 0;
+
+  constructor(initialCapacity: number) {
+    this.buffer = Buffer.allocUnsafe(Math.max(PACKED_BYTES_MIN_INITIAL_CAPACITY, initialCapacity));
+  }
+
+  appendUtf8(value: string): { offset: number; length: number } {
+    const byteLength = Buffer.byteLength(value, "utf8");
+    const offset = this.length;
+    this.ensure(byteLength);
+    this.buffer.write(value, offset, byteLength, "utf8");
+    this.length += byteLength;
+    return { offset, length: byteLength };
+  }
+
+  toBuffer(): Buffer | null {
+    return this.length === 0 ? null : this.buffer.subarray(0, this.length);
+  }
+
+  private ensure(extra: number): void {
+    const required = this.length + extra;
+    if (required <= this.buffer.length) return;
+    let capacity = this.buffer.length;
+    while (capacity < required) capacity *= 2;
+    const next = Buffer.allocUnsafe(capacity);
+    this.buffer.copy(next, 0, 0, this.length);
+    this.buffer = next;
+  }
+}
+
+function packedBytesInitialCapacity(totalCells: number): number {
+  return Math.min(
+    PACKED_BYTES_MAX_INITIAL_CAPACITY,
+    Math.max(PACKED_BYTES_MIN_INITIAL_CAPACITY, totalCells * PACKED_BYTES_CELL_CAPACITY_HINT)
+  );
+}
+
+function writePackedParamCell(
+  value: QueryValue,
+  cellIndex: number,
+  cellTypes: Buffer,
+  i64Values: Buffer,
+  f64Values: Buffer,
+  bytesOffsets: Buffer,
+  bytesLens: Buffer,
+  bytesWriter: PackedBytesWriter,
+  what: string | null,
+  rowIndex: number,
+  column: string,
+  offsetWidth: PackedOffsetWidth,
+  compactCellTypes: boolean
+): boolean {
+  if (value === null) {
+    writePackedCellType(cellTypes, cellIndex, CellKind.Null, compactCellTypes);
+    return true;
+  }
+  if (typeof value === "boolean") {
+    writePackedCellType(cellTypes, cellIndex, CellKind.Bool, compactCellTypes);
+    i64Values.writeBigInt64LE(value ? 1n : 0n, cellIndex * 8);
+    return true;
+  }
+  if (typeof value === "bigint") {
+    checkParamCellI64Range(value, what, rowIndex, column);
+    writePackedCellType(cellTypes, cellIndex, CellKind.Int64, compactCellTypes);
+    i64Values.writeBigInt64LE(value, cellIndex * 8);
+    return true;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new VelrTypeError(`${paramCellWhat(what, rowIndex, column)} must be finite`);
+    }
+    if (Number.isInteger(value)) {
+      if (!Number.isSafeInteger(value)) {
+        throw new VelrTypeError(
+          `${paramCellWhat(what, rowIndex, column)} integer is not safely representable; pass a bigint`
+        );
+      }
+      writePackedCellType(cellTypes, cellIndex, CellKind.Int64, compactCellTypes);
+      i64Values.writeBigInt64LE(BigInt(value), cellIndex * 8);
+      return true;
+    }
+    writePackedCellType(cellTypes, cellIndex, CellKind.Double, compactCellTypes);
+    f64Values.writeDoubleLE(value, cellIndex * 8);
+    return true;
+  }
+  if (typeof value === "string") {
+    return writePackedUtf8(
+      cellTypes,
+      bytesOffsets,
+      bytesLens,
+      bytesWriter,
+      cellIndex,
+      CellKind.Text,
+      value,
+      offsetWidth,
+      compactCellTypes
+    );
+  }
+
+  return writePackedUtf8(
+    cellTypes,
+    bytesOffsets,
+    bytesLens,
+    bytesWriter,
+    cellIndex,
+    CellKind.Json,
+    queryValueToJson(value, paramCellWhat(what, rowIndex, column)),
+    offsetWidth,
+    compactCellTypes
+  );
+}
+
+function writePackedCellType(cellTypes: Buffer, cellIndex: number, kind: CellKind, compact: boolean): void {
+  if (compact) {
+    cellTypes[cellIndex] = kind;
+  } else {
+    cellTypes.writeInt32LE(kind, cellIndex * 4);
+  }
+}
+
+function writePackedUtf8(
+  cellTypes: Buffer,
+  bytesOffsets: Buffer,
+  bytesLens: Buffer,
+  bytesWriter: PackedBytesWriter,
+  cellIndex: number,
+  kind: CellKind,
+  value: string,
+  offsetWidth: PackedOffsetWidth,
+  compactCellTypes: boolean
+): boolean {
+  const bytes = bytesWriter.appendUtf8(value);
+  writePackedCellType(cellTypes, cellIndex, kind, compactCellTypes);
+  if (offsetWidth === "u32") {
+    if (bytes.offset > PACKED_U32_MAX || bytes.length > PACKED_U32_MAX) return false;
+    bytesOffsets.writeUInt32LE(bytes.offset, cellIndex * 4);
+    bytesLens.writeUInt32LE(bytes.length, cellIndex * 4);
+  } else {
+    bytesOffsets.writeBigUInt64LE(BigInt(bytes.offset), cellIndex * 8);
+    bytesLens.writeBigUInt64LE(BigInt(bytes.length), cellIndex * 8);
+  }
+  return true;
+}
+
+function queryValueToParamCell(
+  value: QueryValue,
+  keepAlive: Buffer[],
+  what: string | null,
+  rowIndex = -1,
+  column = ""
+): CellRaw {
+  if (value === null) return nullParamCell();
+  if (typeof value === "boolean") {
+    return { ty: CellKind.Bool, i64_: value ? 1n : 0n, f64_: 0, ptr: null, len: 0 };
+  }
+  if (typeof value === "bigint") {
+    checkParamCellI64Range(value, what, rowIndex, column);
+    return { ty: CellKind.Int64, i64_: value, f64_: 0, ptr: null, len: 0 };
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new VelrTypeError(`${paramCellWhat(what, rowIndex, column)} must be finite`);
+    }
+    if (Number.isInteger(value)) {
+      if (!Number.isSafeInteger(value)) {
+        throw new VelrTypeError(
+          `${paramCellWhat(what, rowIndex, column)} integer is not safely representable; pass a bigint`
+        );
+      }
+      return { ty: CellKind.Int64, i64_: BigInt(value), f64_: 0, ptr: null, len: 0 };
+    }
+    return { ty: CellKind.Double, i64_: 0n, f64_: value, ptr: null, len: 0 };
+  }
+  if (typeof value === "string") {
+    const valueView = makeStrView(value);
+    keepAlive.push(valueView.backing);
+    return { ty: CellKind.Text, i64_: 0n, f64_: 0, ptr: valueView.backing, len: valueView.backing.length };
+  }
+
+  const json = Buffer.from(queryValueToJson(value, paramCellWhat(what, rowIndex, column)), "utf8");
+  keepAlive.push(json);
+  return { ty: CellKind.Json, i64_: 0n, f64_: 0, ptr: json, len: json.length };
+}
+
+function paramCellWhat(what: string | null, rowIndex: number, column: string): string {
+  if (what !== null) return what;
+  if (rowIndex >= 0) return `parameter row ${rowIndex}.${column}`;
+  return "parameter value";
+}
+
+function checkParamCellI64Range(
+  value: bigint,
+  what: string | null,
+  rowIndex: number,
+  column: string
+): void {
+  if (value < I64_MIN || value > I64_MAX) {
+    throw new VelrTypeError(`${paramCellWhat(what, rowIndex, column)} is outside signed 64-bit range`);
+  }
 }
 
 function validateParamName(name: string): void {
@@ -814,7 +1540,8 @@ function checkI64Range(value: bigint, what: string): void {
 
 export function buildQueryOptions(
   maxResultRows: number | null | undefined,
-  params: QueryParams | null | undefined
+  params: QueryParams | null | undefined,
+  cypher?: string
 ): { raw: QueryOptionsRaw | null; paramsHandle: NativePointer } {
   const hasMax = maxResultRows != null;
   if (hasMax) {
@@ -822,7 +1549,7 @@ export function buildQueryOptions(
       throw new VelrTypeError("maxResultRows must be a non-negative safe integer");
     }
   }
-  const paramsHandle = buildQueryParams(params);
+  const paramsHandle = buildQueryParams(params, cypher ? rowMapColumnHintsForCypher(cypher, params) : undefined);
   if (!hasMax && isNullPointer(paramsHandle)) return { raw: null, paramsHandle: null };
 
   return {
@@ -833,6 +1560,24 @@ export function buildQueryOptions(
     },
     paramsHandle
   };
+}
+
+function rowMapColumnHintsForCypher(
+  cypher: string,
+  params: QueryParams | null | undefined
+): RowMapColumnHints | undefined {
+  if (params == null) return undefined;
+  if (typeof params !== "object" || Array.isArray(params)) return undefined;
+
+  let hints: Map<string, readonly string[]> | undefined;
+  for (const [name, value] of Object.entries(params)) {
+    if (!Array.isArray(value) || !value.every(isQueryMap)) continue;
+    const columns = queryParamRowMapRequiredColumns(cypher, name);
+    if (columns == null) continue;
+    if (!hints) hints = new Map();
+    hints.set(name, columns);
+  }
+  return hints;
 }
 
 export function registerVectorCallback(embedder: VectorEmbedder): NativePointer {

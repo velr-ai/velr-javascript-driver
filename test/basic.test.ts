@@ -134,6 +134,23 @@ describe("Velr JavaScript driver", () => {
     });
   });
 
+  it("exposes schema migration and maintenance helpers", () => {
+    using db = openOrSkip();
+    if (!db) return;
+
+    const schemaVersion = db.schemaVersion();
+    const currentSchemaVersion = db.currentSchemaVersion();
+    expect(schemaVersion).toBe(currentSchemaVersion);
+    expect(db.needsMigration()).toBe(false);
+
+    const report = db.migrate();
+    expect(report.fromVersion).toBe(schemaVersion);
+    expect(report.toVersion).toBe(currentSchemaVersion);
+    expect(report.status).toBe("already_current");
+    expect(report.steps).toEqual([]);
+    db.vacuum();
+  });
+
   it("runs a basic query with parameters", () => {
     using db = openOrSkip();
     if (!db) return;
@@ -154,6 +171,67 @@ describe("Velr JavaScript driver", () => {
     );
 
     expect(rows).toEqual([{ name: "Grace", age: 41 }]);
+  });
+
+  it("passes list-of-map parameters without changing map shape", () => {
+    using db = openOrSkip();
+    if (!db) return;
+
+    const rows = db.query<{ row: unknown }>(
+      "UNWIND $rows AS row RETURN row AS row ORDER BY row.id",
+      {
+        params: {
+          rows: [
+            { id: 1, value: null, name: "explicit" },
+            { id: 2, name: "missing" }
+          ]
+        },
+        int64: "number"
+      }
+    );
+
+    expect(rows).toEqual([
+      { row: { id: 1, name: "explicit", value: null } },
+      { row: { id: 2, name: "missing" } }
+    ]);
+  });
+
+  it("imports projected list-of-map parameters with extra input fields", () => {
+    using db = openOrSkip();
+    if (!db) return;
+
+    db.run(
+      `
+      UNWIND $rows AS row
+      WITH row.id AS id, row.name AS name
+      MERGE (thing:ProjectedParam {id: id})
+      SET thing.name = name
+      `,
+      {
+        params: {
+          rows: [
+            { id: "a", name: "Ada", ignored: "unused" },
+            { id: "b", name: "Grace", ignored: "unused" }
+          ]
+        }
+      }
+    );
+
+    const rows = db.query<{ id: string; name: string }>(
+      "MATCH (thing:ProjectedParam) RETURN thing.id AS id, thing.name AS name ORDER BY id"
+    );
+
+    expect(rows).toEqual([
+      { id: "a", name: "Ada" },
+      { id: "b", name: "Grace" }
+    ]);
+  });
+
+  it("validates params on run shortcuts", () => {
+    using db = openOrSkip();
+    if (!db) return;
+
+    expect(() => db.run("RETURN 1", { params: [] as any })).toThrow("query params must be an object");
   });
 
   it("supports transaction helper rollback on throw", () => {
@@ -466,11 +544,57 @@ describe("Velr JavaScript driver", () => {
     }
   });
 
+  it("can query a stored-vector index with a numeric vector parameter", () => {
+    if (!runNativeFeatureTests) return;
+    using featureDb = openFeatureDbOrSkip();
+    if (!featureDb) return;
+    const { db } = featureDb;
+
+    try {
+      db.run(`
+        CREATE (:Chunk {title: 'Alpha', embedding: [1.0, 0.0, 0.0]}),
+               (:Chunk {title: 'Beta', embedding: [0.0, 1.0, 0.0]}),
+               (:Chunk {title: 'Gamma', embedding: [0.0, 0.0, 1.0]})
+      `);
+      db.run(`
+        CREATE VECTOR INDEX chunkEmbedding IF NOT EXISTS
+        FOR (n:Chunk)
+        ON (n.embedding)
+        OPTIONS {
+          indexConfig: {
+            dimensions: 3,
+            metric: 'cosine'
+          }
+        }
+      `);
+
+      const rows = db.query<{ title: string; score: number }>(
+        `
+        CALL db.index.vector.queryNodes('chunkEmbedding', 1, $embedding)
+        YIELD node, score
+        RETURN node.title AS title, score
+        `,
+        { params: { embedding: [0.0, 1.0, 0.0] } }
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.title).toBe("Beta");
+      expect(rows[0]!.score).toBeGreaterThan(0);
+    } catch (err) {
+      if (vectorUnavailable(err)) return;
+      throw err;
+    }
+  });
+
   it("exposes the synchronous driver shape through async worker methods", async () => {
     const db = await openWorkerOrSkip();
     if (!db) return;
 
     try {
+      expect(await db.schemaVersion()).toBe(await db.currentSchemaVersion());
+      expect(await db.needsMigration()).toBe(false);
+      expect((await db.migrate()).status).toBe("already_current");
+      await db.vacuum();
+
       await db.run(`
         CREATE (:Job {name: 'background'}),
                (:Job {name: 'foreground'})

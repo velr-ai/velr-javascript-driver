@@ -90,15 +90,25 @@ function arrowIpcBuffer(bytes: Buffer | Uint8Array): Buffer {
 }
 
 function withQueryOptions<T>(
+  cypher: string,
   options: QueryOptions | undefined,
   run: (raw: QueryOptionsRaw | null) => T
 ): T {
-  const { raw, paramsHandle } = buildQueryOptions(options?.maxResultRows, options?.params);
+  const { raw, paramsHandle } = buildQueryOptions(options?.maxResultRows, options?.params, cypher);
   try {
     return run(raw);
   } finally {
     freeQueryParams(paramsHandle);
   }
+}
+
+function requiresNativeQueryOptions(options: QueryOptions | undefined): boolean {
+  if (!options) return false;
+  if (options.maxResultRows != null) return true;
+  const params = options.params;
+  if (params == null) return false;
+  if (typeof params !== "object" || Array.isArray(params)) return true;
+  return Object.keys(params).length > 0;
 }
 
 /**
@@ -316,12 +326,41 @@ export class Velr implements ParentHandle {
     }
   }
 
+  /** Compact a writable, current-schema database file with Velr's maintenance vacuum. */
+  vacuum(): void {
+    const vacuum = getBindings().lib.velr_vacuum;
+    if (!vacuum) {
+      throw new VelrError("loaded Velr runtime does not expose velr_vacuum");
+    }
+    const outErrValue = outPtr();
+    check(vacuum(this.ptr(), outErrValue), outErrValue);
+  }
+
   /**
    * Register or replace a synchronous vector embedder.
    *
-   * The `name` must match the embedder referenced by vector indexes or vector
-   * search queries. The callback is invoked synchronously by the native runtime,
-   * so it must not perform asynchronous work.
+   * Embedder-backed vector indexes reference this name from
+   * `CREATE VECTOR INDEX ... OPTIONS { indexConfig: { embedder: 'name' } }`.
+   * Velr calls the callback when indexed source values change and when text
+   * query payloads need embeddings.
+   *
+   * Stored-vector indexes, such as `CREATE VECTOR INDEX ... ON (n.embedding)`,
+   * index the vector/list property directly and do not use a registered
+   * embedder. They query with numeric vectors/lists.
+   *
+   * `OPTIONS { indexConfig: ... }` configures Velr vector indexes. Prefer
+   * `` `vector.dimensions` `` and `` `vector.similarity_function` `` where they exist;
+   * `dimensions` and `metric` are accepted aliases. `embedder` names a registered callback for
+   * `ON EACH [...]` indexes, `embedder_fingerprint` stores application model/version metadata,
+   * and `cache_policy` controls embedder-output caching with `required`, `best_effort`, or
+   * `none`. It defaults to `required` with an embedder and `none` without one. Stored-vector
+   * indexes require `none`. HNSW tuning uses `` `vector.hnsw.m` `` (`1..512` neighbor links per
+   * vector), `` `vector.hnsw.ef_construction` `` (`1..3200` build candidates per inserted
+   * vector), and `` `vector.hnsw.ef_search` `` (`1..3200` query candidates; default `64`). Velr
+   * manages the scalar format and storage/cache engines internally.
+   *
+   * Direct-driver callbacks must return synchronously. Use `VelrWorker` when
+   * your embedder needs asynchronous work.
    */
   registerVectorEmbedder(name: string, embedder: VectorEmbedder): void {
     if (typeof name !== "string") throw new VelrTypeError("vector embedder name must be a string");
@@ -380,7 +419,7 @@ export class Velr implements ParentHandle {
   exec(cypher: string, options?: QueryOptions): Stream {
     ensureNoNul(cypher, "openCypher");
     const { lib } = getBindings();
-    return withQueryOptions(options, (raw) => {
+    return withQueryOptions(cypher, options, (raw) => {
       const outStream = outPtr();
       const outErrValue = outPtr();
       if (raw) {
@@ -409,7 +448,7 @@ export class Velr implements ParentHandle {
   execOne(cypher: string, options?: QueryOptions): Table {
     ensureNoNul(cypher, "openCypher");
     const { lib } = getBindings();
-    return withQueryOptions(options, (raw) => {
+    return withQueryOptions(cypher, options, (raw) => {
       const outTable = outPtr();
       const outErrValue = outPtr();
       if (raw) {
@@ -436,16 +475,18 @@ export class Velr implements ParentHandle {
    * This is the preferred helper for DDL and writes where no rows are needed.
    */
   run(cypher: string, options?: QueryOptions): void {
-    const stream = this.exec(cypher, options);
-    try {
-      for (;;) {
-        const table = stream.nextTable();
-        if (!table) break;
-        table.close();
-      }
-    } finally {
-      stream.close();
+    ensureNoNul(cypher, "openCypher");
+    const { lib } = getBindings();
+    const hasOptions = requiresNativeQueryOptions(options);
+    if (!hasOptions) {
+      const outErrValue = outPtr();
+      check(lib.velr_run(this.ptr(), cypher, outErrValue), outErrValue);
+      return;
     }
+    withQueryOptions(cypher, options, (raw) => {
+      const outErrValue = outPtr();
+      check(lib.velr_run_with_options(this.ptr(), cypher, raw!, outErrValue), outErrValue);
+    });
   }
 
   /** Alias for `run()`. */
@@ -1070,7 +1111,7 @@ export class VelrTx implements ParentHandle, ChildHandle {
   exec(cypher: string, options?: QueryOptions): StreamTx {
     ensureNoNul(cypher, "openCypher");
     const { lib } = getBindings();
-    return withQueryOptions(options, (raw) => {
+    return withQueryOptions(cypher, options, (raw) => {
       const outStream = outPtr();
       const outErrValue = outPtr();
       if (raw) {
@@ -1125,16 +1166,18 @@ export class VelrTx implements ParentHandle, ChildHandle {
 
   /** Execute Cypher inside this transaction and discard all result tables. */
   run(cypher: string, options?: QueryOptions): void {
-    const stream = this.exec(cypher, options);
-    try {
-      for (;;) {
-        const table = stream.nextTable();
-        if (!table) break;
-        table.close();
-      }
-    } finally {
-      stream.close();
+    ensureNoNul(cypher, "openCypher");
+    const { lib } = getBindings();
+    const hasOptions = requiresNativeQueryOptions(options);
+    if (!hasOptions) {
+      const outErrValue = outPtr();
+      check(lib.velr_tx_run(this.ptr(), cypher, outErrValue), outErrValue);
+      return;
     }
+    withQueryOptions(cypher, options, (raw) => {
+      const outErrValue = outPtr();
+      check(lib.velr_tx_run_with_options(this.ptr(), cypher, raw!, outErrValue), outErrValue);
+    });
   }
 
   /** Alias for `run()`. */
