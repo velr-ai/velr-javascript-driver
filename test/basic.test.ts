@@ -429,6 +429,46 @@ describe("Velr JavaScript driver", () => {
     expect(directValues(db, "NamedCommitRetained")).toEqual(["c", "outer"]);
   });
 
+  it("commits active named savepoints durably in the direct driver", () => {
+    if (!runNativeTests) return;
+
+    const dir = mkdtempSync(join(tmpdir(), "velr-js-commit-savepoints-"));
+    const path = join(dir, "graph.db");
+    let db: Velr | null = null;
+    try {
+      try {
+        db = Velr.open(path);
+      } catch (err) {
+        if (missingRuntime(err)) return;
+        throw err;
+      }
+
+      const nestedTx = db.beginTx();
+      nestedTx.run("CREATE (:CommitSavepoint {k:'before'})");
+      nestedTx.savepointNamed("outer");
+      nestedTx.run("CREATE (:CommitSavepoint {k:'middle'})");
+      nestedTx.savepointNamed("inner");
+      nestedTx.run("CREATE (:CommitSavepoint {k:'after'})");
+      nestedTx.commit();
+
+      const retainedTx = db.beginTx();
+      retainedTx.run("CREATE (:CommitRetained {k:'before'})");
+      retainedTx.savepointNamed("retained");
+      retainedTx.run("CREATE (:CommitRetained {k:'discarded'})");
+      retainedTx.rollbackTo("retained");
+      retainedTx.run("CREATE (:CommitRetained {k:'surviving'})");
+      retainedTx.commit();
+
+      db.close();
+      db = Velr.open(path);
+      expect(directValues(db, "CommitSavepoint")).toEqual(["after", "before", "middle"]);
+      expect(directValues(db, "CommitRetained")).toEqual(["before", "surviving"]);
+    } finally {
+      db?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("binds Arrow IPC bytes through the direct driver when the runtime supports it", () => {
     using db = openOrSkip();
     if (!db) return;

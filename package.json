@@ -1,6 +1,6 @@
 {
   "name": "@velr-ai/velr",
-  "version": "0.2.44",
+  "version": "0.2.45",
   "description": "JavaScript and TypeScript bindings for Velr, an embedded openCypher graph database built on SQLite",
   "license": "MIT",
   "type": "module",
@@ -49,10 +49,10 @@
     }
   },
   "optionalDependencies": {
-    "@velr-ai/runtime-darwin-universal": "0.2.44",
-    "@velr-ai/runtime-linux-x64-gnu": "0.2.44",
-    "@velr-ai/runtime-linux-arm64-gnu": "0.2.44",
-    "@velr-ai/runtime-win32-x64-msvc": "0.2.44"
+    "@velr-ai/runtime-darwin-universal": "0.2.45",
+    "@velr-ai/runtime-linux-x64-gnu": "0.2.45",
+    "@velr-ai/runtime-linux-arm64-gnu": "0.2.45",
+    "@velr-ai/runtime-win32-x64-msvc": "0.2.45"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

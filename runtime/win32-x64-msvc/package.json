@@ -1,6 +1,6 @@
 {
   "name": "@velr-ai/runtime-win32-x64-msvc",
-  "version": "0.2.44",
+  "version": "0.2.45",
   "description": "Velr native runtime for Windows x64 MSVC",
   "license": "LicenseRef-Velr-Runtime-Binary-Redistribution-License",
   "repository": {
