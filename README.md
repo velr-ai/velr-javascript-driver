@@ -1,14 +1,11 @@
 # Velr
 
-Velr is an embedded property-graph database from Velr.ai, written in Rust,
-built on top of SQLite (persisting to a standard SQLite database file) and
-queried using the openCypher language.
+Velr is an embedded property-graph database from Velr.ai, queried using openCypher.
 
 It runs in-process and is designed for local, embedded, and edge use cases.
 
-This package provides the **JavaScript and TypeScript bindings** for Velr. It
-wraps a bundled native runtime with a C ABI, implemented in Rust, and exposes a
-small, idiomatic Node.js API for executing Cypher queries, streaming result
+This package provides the **JavaScript and TypeScript bindings** for Velr and
+bundles the database runtime. It exposes an idiomatic Node.js API for executing Cypher queries, streaming result
 tables, working with transactions, using worker threads, and exporting or
 binding Arrow IPC data.
 
@@ -27,37 +24,23 @@ We'd love to have you join the Velr community.
 
 ---
 
-## Release status
+## Compatibility
 
-Velr is currently in public **alpha**.
+Databases created before Velr 0.2.14 must be recreated by re-importing the source
+data.
 
-- The JavaScript and TypeScript API is still evolving.
-- Velr supports openCypher and passes all positive openCypher TCK tests. Exact
-  error semantics are not guaranteed to match other openCypher implementations.
-- During the `0.2.x` series, we do **not** guarantee database migration or
-  on-disk database compatibility between releases.
-- Velr 0.2.14 includes a breaking on-disk storage change; existing databases
-  from earlier releases must be recreated by re-importing the source data.
-- Starting with the `0.3.x` series, we intend to guarantee internal database
-  compatibility within the branch.
+### Schema version 11 compatibility
 
-### Schema version 9 compatibility
+New databases use schema version 11. Databases at schema versions 3 through 9
+require an [explicit migration](#schema-migration) before graph queries can run.
 
-This release uses on-disk schema version 9. Database files at supported schema
-versions 8 or earlier can still be opened for reads without changing the file,
-but they must be explicitly migrated to schema version 9 before writes or
-features that require the current schema. Opening a database never migrates it
-automatically.
-
-Velr is already usable for real workflows and representative use cases, but
-rough edges remain and the API is not yet stable.
-
-Fulltext search and vector search are available today through Cypher DDL and
-`CALL` syntax. API details may still evolve while Velr remains alpha.
+Create fulltext and vector indexes with Cypher DDL and query them with `CALL`.
 
 ---
 
 ## Installation
+
+The driver requires Node.js 22 or newer.
 
 Install from npm:
 
@@ -135,20 +118,45 @@ console.log(rows);
 ```
 
 `openReadonly()` never creates, initializes, migrates, or repairs a database.
-The file must already exist and have a supported Velr schema version. Older
-supported databases, such as schema version 3, 4, 5, 6, 7, or 8 databases
-opened by a schema version 9 runtime, remain available for reads. Writes and
-features that require the current schema fail with a normal query error until
-the database is explicitly migrated.
+The file must already exist and have a supported Velr schema version. After
+migrating an older database on a writable connection, reopen any read-only
+connections before querying it.
+
+### Inline edge properties
+
+Use `Velr.create()` to choose a frequently used relationship property, such
+as a numeric timestamp. The choice applies to that name across all
+relationship types.
+
+```ts
+import { Velr } from "@velr-ai/velr";
+
+{
+  using db = Velr.create("events.db", { inlineEdgeProperties: ["timestamp"] });
+  db.run("CREATE ()-[:EVENT {timestamp: 1700000000}]->()");
+}
+
+using db = Velr.openReadonly("events.db");
+console.log(db.inlineEdgeProperties()); // ["timestamp"]
+console.log(db.query("MATCH ()-[r:EVENT]->() RETURN r.timestamp AS timestamp"));
+// [{ timestamp: 1700000000 }]
+```
+
+Use a new file path and pass at most one name. The selection is fixed when
+the database is created. Omit the list or pass an empty list to leave inline
+edge properties disabled. Velr can inline integers, floating-point numbers,
+and strings up to 128 UTF-8 bytes. Values too large to inline still work with
+the same Cypher reads and writes.
+
+`VelrWorker.create()` and `inlineEdgeProperties()` provide the same
+operations as promises in the worker driver.
 
 ---
 
 ## Schema migration
 
-Velr does not migrate supported older databases automatically on open. Use the
-driver migration API, or run `MIGRATE DATABASE`, from maintenance code when you
-intend to update the on-disk schema. See the release-status note above for the
-schema version 9 read/write compatibility behavior.
+Open the database on a writable connection and call `migrate()` or run
+`MIGRATE DATABASE` outside an active transaction.
 
 ```ts
 import { Velr } from "@velr-ai/velr";
@@ -192,11 +200,6 @@ Use `SHOW CURRENT GRAPH SHAPE` to inspect the observed schema of the graph. It
 reports the shape present in stored data: node labels, relationship types,
 properties, observed value types, and counts. It is an observed shape surface,
 not a declared GQL graph type.
-
-`SHOW CURRENT GRAPH SHAPE` is available on schema version 5 or newer databases.
-Older supported databases can still be opened for reads, but must be migrated
-explicitly before this command is valid. Schema version 5 introduced this
-inventory through the write planner instead of persistent graph-shape triggers.
 
 The default projection returns `element_kind`, `element_name`, `property_name`,
 `observed_type`, `owner_count`, `present_count`, and `missing_count`. `YIELD *`
@@ -263,13 +266,20 @@ Field scoping applies to the next term or phrase only. For example,
 `title:graph search` searches `graph` in `title` and `search` in the default
 fulltext field.
 
-`score` is a non-normalized relevance score. Higher scores are better within a
-single query result set; scores are not guaranteed to be in `0..1` or
-comparable across different queries.
+`score` is an unnormalized, query-specific relevance score. Higher scores
+indicate more relevant matches within that query's result set. Compare scores
+within the same query; values are not restricted to `0..1`.
 
-Fulltext indexes are kept up to date by writes. For file-backed databases,
-Velr repairs missing or corrupt fulltext index data automatically when the
-database is opened.
+Fulltext queries return up to 1,000 matches by default. Pass a third
+argument such as `{limit: 5000}` to change the cap.
+
+Fulltext queries see changes made earlier in the current transaction.
+Opening a file-backed database for writing applies pending index updates
+and repairs missing or corrupt index data. If the shared index cannot serve
+the query's snapshot, Velr builds a temporary index for that search. This
+can happen when updates are pending, a concurrent writer has published a
+newer index, or a read-only connection opens an index that needs repair.
+The temporary build scans the indexed graph.
 
 ---
 
@@ -422,8 +432,8 @@ Tables returned by `execOne()` are **parent-scoped**, not stream-scoped.
 - `Velr.execOne()` returns a table parented to the connection.
 - `VelrTx.execOne()` returns a table parented to the transaction.
 
-That means the returned table remains usable after the internal stream logic
-used by `execOne()` has finished.
+The returned table remains usable until it or its parent connection or
+transaction is closed.
 
 Even so, tables should still be closed when no longer needed, ideally with
 `try` / `finally` or TypeScript `using`.
@@ -660,9 +670,6 @@ HNSW tuning options:
 | `` `vector.hnsw.ef_construction` `` | `1..3200` candidates | Build-time candidate pool per inserted vector. For example, `320` means the builder considers a working set of 320 candidate neighbors while placing each vector. Higher values can improve index quality and recall, usually with slower index creation. |
 | `` `vector.hnsw.ef_search` `` | `1..3200` candidates | Query-time candidate pool. For example, `128` means each search keeps a working set of 128 candidate vectors while traversing the HNSW graph. Higher values can improve recall, usually with slower searches. Velr's default is `64`. |
 
-Velr manages the vector scalar format and storage/cache engines internally. Use
-the options above for application configuration.
-
 ```ts
 import { Velr, type VectorEmbedder } from "@velr-ai/velr";
 
@@ -778,11 +785,57 @@ try {
 
 ---
 
-## Query language support
+## Regular expression matching
 
-Velr supports the openCypher query language and passes all positive openCypher
-TCK tests. Exact error semantics, including error messages, categories, and
-timing, are not guaranteed to match other openCypher implementations.
+Use the openCypher operator `=~` to match an entire string against a regular
+expression. Matching is case-sensitive by default. Use `(?i)` for
+case-insensitive matching.
+
+```cypher
+RETURN 'alice' =~ '(?i)A.*' AS matched
+```
+
+This returns `true`.
+
+The pattern string uses the Rust regex dialect. Lookaround and backreferences
+are unsupported. A null or non-string operand yields `null`. An invalid
+pattern raises a query error when both operands are strings.
+See [supported pattern syntax](https://docs.rs/regex/latest/regex/#syntax).
+
+---
+
+## Errors
+
+Query and database failures throw `VelrError`, with diagnostic text in `message`
+and an optional numeric operation status in `code`. For Cypher errors, the
+diagnostic identifies the query category and compile-time or runtime phase.
+Categories include
+`SyntaxError`, `TypeError`, `ArgumentError`, `EntityNotFound`,
+`ConstraintVerificationFailed`, `SemanticError`, `ParameterMissing`,
+`ProcedureNotFound`, and `ArithmeticError`.
+
+`VelrStateError` extends `VelrError` for closed or consumed handles.
+`VelrTypeError` extends JavaScript `TypeError` for invalid JavaScript arguments
+and incompatible value conversions.
+
+Handle errors around both query execution and result consumption. `nextTable()`,
+row iteration, and collection can throw after a stream or table is returned.
+Worker API operations reject their promises with the corresponding errors.
+
+```ts
+import { Velr, VelrError } from "@velr-ai/velr";
+
+using db = Velr.open(null);
+try {
+  console.log(db.query("RETURN missing"));
+} catch (error) {
+  if (error instanceof VelrError) {
+    console.error(error.message);
+  } else {
+    throw error;
+  }
+}
+```
 
 ---
 
@@ -881,45 +934,13 @@ platform so user installation stays:
 npm install @velr-ai/velr
 ```
 
-Currently targeted bundled platforms:
+Bundled platforms:
 
-- macOS universal (arm64 + x86_64)
+- macOS arm64 (Apple Silicon)
+- macOS x86_64 (Intel)
 - Linux x86_64
 - Linux aarch64
 - Windows x86_64
-
-For local Velr development only, you can override runtime resolution with an
-explicit native library path:
-
-```bash
-VELR_NATIVE_LIBRARY=/path/to/libvelrc.dylib node app.mjs
-```
-
-`VELR_LIB` is accepted as a shorter alias. This override is intended for local
-development and troubleshooting; normal npm users should not need it.
-
----
-
-## Development
-
-```bash
-npm install
-npm run typecheck
-npm test
-npm run build
-VELR_JS_NATIVE_TESTS=1 npm test
-```
-
-Useful development environment variables:
-
-- `VELR_NATIVE_LIBRARY`: explicit path to `libvelrc.dylib`, `libvelrc.so`, or
-  `velrc.dll`
-- `VELR_LIB`: short alias for `VELR_NATIVE_LIBRARY`
-- `VELR_JS_NATIVE_TESTS=1`: opt in to tests that load the native runtime
-- `VELR_JS_NATIVE_FEATURE_TESTS=1`: also run fulltext/vector engine feature
-  tests
-
-The driver targets Node.js 22 and newer.
 
 ---
 

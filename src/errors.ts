@@ -1,11 +1,18 @@
 /**
  * Base error thrown for failures reported by the Velr runtime.
  *
- * Native C ABI status codes are exposed through `code` when the runtime
- * provides one.
+ * For openCypher errors, `message` identifies the query error category and
+ * compile-time or runtime phase, followed by diagnostic context. A numeric
+ * operation status is exposed through `code` when available; it is separate
+ * from the query error category.
+ *
+ * Query execution and result iteration can both throw this error.
+ * Query categories include `SyntaxError`, `TypeError`, `ArgumentError`,
+ * `EntityNotFound`, `ConstraintVerificationFailed`, `SemanticError`,
+ * `ParameterMissing`, `ProcedureNotFound`, and `ArithmeticError`.
  */
 export class VelrError extends Error {
-  /** Optional numeric status code returned by the Velr C ABI. */
+  /** Optional numeric operation status, separate from the Cypher error category. */
   readonly code?: number;
 
   /** Create a Velr runtime error. */

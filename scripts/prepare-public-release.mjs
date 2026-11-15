@@ -5,13 +5,22 @@ import { fileURLToPath } from "node:url";
 
 const RUNTIME_PACKAGES = [
   {
-    dir: "darwin-universal",
-    name: "@velr-ai/runtime-darwin-universal",
-    description: "Velr native runtime for macOS universal",
-    rustDir: "macos-universal",
+    dir: "darwin-arm64",
+    name: "@velr-ai/runtime-darwin-arm64",
+    description: "Velr native runtime for macOS arm64",
+    rustDir: "macos-aarch64",
     file: "libvelrc.dylib",
     os: ["darwin"],
-    cpu: ["arm64", "x64"]
+    cpu: ["arm64"]
+  },
+  {
+    dir: "darwin-x64",
+    name: "@velr-ai/runtime-darwin-x64",
+    description: "Velr native runtime for macOS x64",
+    rustDir: "macos-x86_64",
+    file: "libvelrc.dylib",
+    os: ["darwin"],
+    cpu: ["x64"]
   },
   {
     dir: "linux-x64-gnu",

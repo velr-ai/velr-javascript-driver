@@ -22,6 +22,7 @@ export type {
   CellAsJsOptions,
   CellType,
   CellValue,
+  CreateOptions,
   ExplainPlan,
   ExplainPlanMeta,
   ExplainStatement,

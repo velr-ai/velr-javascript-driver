@@ -1,6 +1,6 @@
-# @velr-ai/runtime-darwin-universal
+# @velr-ai/runtime-darwin-x64
 
-Velr native runtime for macOS universal.
+Velr native runtime for macOS x64.
 
 This package contains the Velr native runtime in compiled binary form only. It is installed as an optional dependency of the `velr` JavaScript and TypeScript driver.
 

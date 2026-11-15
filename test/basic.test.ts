@@ -124,6 +124,58 @@ async function workerCount(db: VelrWorker, label: string): Promise<number> {
 }
 
 describe("Velr JavaScript driver", () => {
+  it.skipIf(!runNativeTests)("creates a file with an inline edge property and reopens it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "velr-js-create-"));
+    const path = join(dir, "graph.db");
+    const largeValue = "x".repeat(129);
+    try {
+      using empty = Velr.create();
+      expect(empty.inlineEdgeProperties()).toEqual([]);
+      {
+        using db = Velr.create(path, { inlineEdgeProperties: ["timestamp"] });
+        expect(db.inlineEdgeProperties()).toEqual(["timestamp"]);
+        db.run("CREATE ()-[:EVENT {timestamp: 1700}]->()");
+        db.run("CREATE ()-[:EVENT {timestamp: $value}]->()", { params: { value: largeValue } });
+        using tx = db.beginTx();
+        tx.run("MATCH ()-[r:EVENT]->() SET r.timestamp = 99");
+        tx.rollback();
+      }
+      expect(() => Velr.create(path)).toThrow(/already exists/i);
+      expect(() => Velr.create(join(dir, "invalid.db"), {
+        inlineEdgeProperties: ["timestamp", "amount"]
+      })).toThrow();
+      using reopened = Velr.openReadonly(path);
+      expect(reopened.inlineEdgeProperties()).toEqual(["timestamp"]);
+      expect(reopened.query("MATCH ()-[r:EVENT]->() RETURN r.timestamp AS value ORDER BY id(r)"))
+        .toEqual([{ value: 1700 }, { value: largeValue }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!runNativeTests)("creates and inspects a database in the worker driver", async () => {
+    const workerModule = await loadBuiltWorkerModuleOrSkip();
+    if (!workerModule) throw new Error("build the worker package before running native tests");
+    const dir = mkdtempSync(join(tmpdir(), "velr-js-worker-create-"));
+    const path = join(dir, "graph.db");
+    try {
+      const { VelrWorker } = workerModule;
+      const db = await VelrWorker.create(path, { inlineEdgeProperties: ["sales,net"] });
+      try {
+        expect(await db.inlineEdgeProperties()).toEqual(["sales,net"]);
+        await db.run("CREATE ()-[:EVENT {`sales,net`: 12}]->()");
+      } finally {
+        await db.close();
+      }
+      await expect(VelrWorker.create(path)).rejects.toThrow(/already exists/i);
+      using reopened = Velr.openReadonly(path);
+      expect(reopened.query("MATCH ()-[r:EVENT]->() RETURN r.`sales,net` AS value"))
+        .toEqual([{ value: 12 }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("converts cells to idiomatic JavaScript values", () => {
     expect(new Cell("null").asJs()).toBeNull();
     expect(new Cell("bool", 1n).asJs()).toBe(true);

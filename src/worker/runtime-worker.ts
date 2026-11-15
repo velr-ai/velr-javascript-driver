@@ -191,6 +191,12 @@ function dispatch(op: string, payload: any): unknown {
       closeDb();
       db = Velr.open(payload.path ?? null);
       return null;
+    case "db.create":
+      closeDb();
+      db = Velr.create(payload.path ?? null, { inlineEdgeProperties: payload.inlineEdgeProperties });
+      return null;
+    case "db.inlineEdgeProperties":
+      return requireDb().inlineEdgeProperties();
     case "db.openReadonly":
       closeDb();
       db = Velr.openReadonly(payload.path);

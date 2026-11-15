@@ -30,6 +30,7 @@ import type {
   CellAsJsOptions,
   CellType,
   CellValue,
+  CreateOptions,
   ExplainPlan,
   ExplainPlanMeta,
   ExplainStatement,
@@ -252,6 +253,33 @@ export class Velr implements ParentHandle {
     return new Velr(outDb[0]);
   }
 
+  /**
+   * Create a new database and return its open connection.
+   *
+   * Pass a new file path, or `null` or `":memory:"` for an in-memory database.
+   * Use `options.inlineEdgeProperties` to choose the property at creation.
+   * Existing paths, invalid options, and unsupported runtimes raise an error.
+   * Close the returned connection or use it with `using`.
+   */
+  static create(path: string | null = null, options: CreateOptions = {}): Velr {
+    if (path != null) ensureNoNul(path, "database path");
+    const { inlineEdgeProperties = [] } = options;
+    if (!Array.isArray(inlineEdgeProperties) || inlineEdgeProperties.some((key) => typeof key !== "string")) {
+      throw new VelrTypeError("inlineEdgeProperties must be an array of property names");
+    }
+    for (const key of inlineEdgeProperties) ensureNoNul(key, "inline edge property name");
+    const { lib } = getBindings();
+    if (!lib.velr_create) {
+      throw new VelrError("loaded Velr runtime does not expose velr_create");
+    }
+    const outDb = outPtr();
+    const outErrValue = outPtr();
+    const count = inlineEdgeProperties.length;
+    check(lib.velr_create(path, count === 0 ? null : inlineEdgeProperties, count, outDb, outErrValue), outErrValue);
+    if (isNullPointer(outDb[0])) throw new VelrError("velr_create returned null database");
+    return new Velr(outDb[0]);
+  }
+
   /** Open an existing database in read-only mode. */
   static openReadonly(path: string): Velr {
     ensureNoNul(path, "database path");
@@ -271,6 +299,35 @@ export class Velr implements ParentHandle {
   /** Whether this connection has already been closed. */
   get closed(): boolean {
     return isNullPointer(this.#ptr);
+  }
+
+  /**
+   * Return a copy of the inline edge property names in configured order.
+   *
+   * The selection remains available after reopening the database. Returns an
+   * empty array when no property is selected. A closed connection or runtime
+   * that cannot report the selection raises an error.
+   */
+  inlineEdgeProperties(): string[] {
+    const db = this.ptr();
+    const { lib } = getBindings();
+    if (!lib.velr_inline_edge_properties_json) {
+      throw new VelrError("loaded Velr runtime does not expose velr_inline_edge_properties_json");
+    }
+    const outJson = outPtr();
+    const outErrValue = outPtr();
+    check(lib.velr_inline_edge_properties_json(db, outJson, outErrValue), outErrValue);
+    const result = outJson[0];
+    if (isNullPointer(result)) throw new VelrError("velr_inline_edge_properties_json returned null JSON");
+    try {
+      const names: unknown = JSON.parse(cStringToString(result, "inline edge properties"));
+      if (!Array.isArray(names) || names.some((name) => typeof name !== "string")) {
+        throw new VelrError("inline edge properties did not decode to a string array");
+      }
+      return names;
+    } finally {
+      lib.velr_string_free(result);
+    }
   }
 
   /** @internal Register a child handle owned by this connection. */
@@ -415,6 +472,7 @@ export class Velr implements ParentHandle {
    *
    * Close the returned stream when finished, or use `run()`/`query()` for common
    * one-shot workflows.
+   * Throws `VelrError` for query failures. Result iteration can also throw.
    */
   exec(cypher: string, options?: QueryOptions): Stream {
     ensureNoNul(cypher, "openCypher");
@@ -613,7 +671,10 @@ export class Stream implements ChildHandle, Iterable<Table> {
     this.#ptr = ptr;
   }
 
-  /** Return the next result table, or `null` when the stream is exhausted. */
+  /**
+   * Return the next result table, or `null` when the stream is exhausted.
+   * Throws `VelrError` if query execution fails while advancing the stream.
+   */
   nextTable(): Table | null {
     const outTable = outPtr();
     const outHas = outInt();
@@ -850,7 +911,10 @@ export class Rows implements ChildHandle, Iterable<Cell[]> {
     this.#buffer = Buffer.alloc(getBindings().cellSize * columnCountValue);
   }
 
-  /** Return the next row, or `null` when the cursor is exhausted. */
+  /**
+   * Return the next row, or `null` when the cursor is exhausted.
+   * Throws `VelrError` if query execution fails while fetching the row.
+   */
   next(): Cell[] | null {
     const outWritten = outInt();
     const outErrValue = outPtr();

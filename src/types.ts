@@ -15,6 +15,20 @@ export type QueryValue =
 /** Named query parameters passed to Cypher as `$name` values. */
 export type QueryParams = Record<string, QueryValue>;
 
+/** Options applied when creating a new database. */
+export interface CreateOptions {
+  /**
+   * Ordered list of case-sensitive relationship property names. Pass zero
+   * or one nonempty name. An omitted or empty list leaves inline edge
+   * properties disabled. The choice applies to every relationship type and
+   * is fixed at creation.
+   *
+   * Integers, floating-point numbers, and strings up to 128 UTF-8 bytes can
+   * be inlined. All values use the same Cypher reads and writes.
+   */
+  readonly inlineEdgeProperties?: readonly string[];
+}
+
 /** Options accepted by query execution helpers. */
 export interface QueryOptions {
   /**

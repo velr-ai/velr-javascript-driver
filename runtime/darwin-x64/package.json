@@ -1,12 +1,12 @@
 {
-  "name": "@velr-ai/runtime-darwin-universal",
-  "version": "0.2.45",
-  "description": "Velr native runtime for macOS universal",
+  "name": "@velr-ai/runtime-darwin-x64",
+  "version": "0.2.61",
+  "description": "Velr native runtime for macOS x64",
   "license": "LicenseRef-Velr-Runtime-Binary-Redistribution-License",
   "repository": {
     "type": "git",
     "url": "https://github.com/velr-ai/velr-javascript-driver.git",
-    "directory": "runtime/darwin-universal"
+    "directory": "runtime/darwin-x64"
   },
   "bugs": {
     "url": "https://github.com/velr-ai/velr-javascript-driver/issues"
@@ -15,7 +15,6 @@
     "darwin"
   ],
   "cpu": [
-    "arm64",
     "x64"
   ],
   "engines": {

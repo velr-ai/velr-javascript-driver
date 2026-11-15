@@ -14,6 +14,7 @@ import type {
   CellAsJsOptions,
   CellType,
   CellValue,
+  CreateOptions,
   ExplainPlan,
   ExplainPlanMeta,
   ExplainStatementMeta,
@@ -292,6 +293,28 @@ export class VelrWorker {
     return client;
   }
 
+  /**
+   * Create a new database in a worker thread.
+   *
+   * Pass a new file path, or `null` or `":memory:"` for an in-memory database.
+   * Use `options.inlineEdgeProperties` to choose the property at creation.
+   * Existing paths, invalid options, and unsupported runtimes reject the
+   * promise. Close the returned connection or use it with `await using`.
+   */
+  static async create(
+    path: string | null = null,
+    options: VelrWorkerOptions & CreateOptions = {}
+  ): Promise<VelrWorker> {
+    const client = VelrWorker.#spawn(options);
+    try {
+      await client.#rpc.call("db.create", { path, inlineEdgeProperties: options.inlineEdgeProperties });
+      return client;
+    } catch (err) {
+      await client.#rpc.terminate();
+      throw err;
+    }
+  }
+
   /** Open an existing database in read-only mode in a worker thread. */
   static async openReadonly(path: string, options: VelrWorkerOptions = {}): Promise<VelrWorker> {
     const client = VelrWorker.#spawn(options);
@@ -312,6 +335,17 @@ export class VelrWorker {
   /** Whether this worker connection has already been closed. */
   get closed(): boolean {
     return this.#closed || this.#rpc.closed;
+  }
+
+  /**
+   * Return the inline edge property names in configured order.
+   *
+   * The selection remains available after reopening the database. Returns an
+   * empty array when no property is selected. A closed connection or runtime
+   * that cannot report the selection rejects the promise.
+   */
+  async inlineEdgeProperties(): Promise<string[]> {
+    return this.#rpc.call("db.inlineEdgeProperties");
   }
 
   /** Return the schema version stored in the opened database. */

@@ -45,6 +45,18 @@ interface NativeLib {
   readonly velr_string_free: (ptr: NativePointer) => void;
   readonly velr_free: (ptr: NativePointer, len: number | bigint) => void;
   readonly velr_open: (path: string | null, outDb: NativePointer[], outErr: NativePointer[]) => number;
+  readonly velr_create?: (
+    path: string | null,
+    properties: readonly string[] | null,
+    count: number,
+    outDb: NativePointer[],
+    outErr: NativePointer[]
+  ) => number;
+  readonly velr_inline_edge_properties_json?: (
+    db: NativePointer,
+    outJson: NativePointer[],
+    outErr: NativePointer[]
+  ) => number;
   readonly velr_open_existing_readonly?: (
     path: string,
     outDb: NativePointer[],
@@ -622,6 +634,8 @@ function createBindings(resolution: RuntimeResolution): NativeBindings {
     velr_string_free: required("void velr_string_free(void *s)"),
     velr_free: required("void velr_free(void *p, size_t len)"),
     velr_open: required("velr_code velr_open(const char *path_or_null, _Out_ velr_db **out_db, _Out_ void **out_err)"),
+    velr_create: optional("velr_code velr_create(const char *path_or_null, const char **inline_edge_properties, size_t inline_edge_properties_count, _Out_ velr_db **out_db, _Out_ void **out_err)"),
+    velr_inline_edge_properties_json: optional("velr_code velr_inline_edge_properties_json(velr_db *db, _Out_ void **out_json, _Out_ void **out_err)"),
     velr_open_existing_readonly: optional("velr_code velr_open_existing_readonly(const char *path, _Out_ velr_db **out_db, _Out_ void **out_err)"),
     velr_close: required("void velr_close(velr_db *db)"),
     velr_register_vector_embedder: optional("velr_code velr_register_vector_embedder(velr_db *db, velr_strview name, velr_vector_embedder_callback *callback, void *user_data, void *free_user_data, _Out_ void **out_err)"),

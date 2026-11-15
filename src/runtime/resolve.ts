@@ -20,10 +20,10 @@ function platformLibraryNames(): readonly string[] {
 
 function runtimePackageNames(): readonly string[] {
   if (process.platform === "darwin" && process.arch === "arm64") {
-    return ["@velr-ai/runtime-darwin-universal"];
+    return ["@velr-ai/runtime-darwin-arm64"];
   }
   if (process.platform === "darwin" && process.arch === "x64") {
-    return ["@velr-ai/runtime-darwin-universal"];
+    return ["@velr-ai/runtime-darwin-x64"];
   }
   if (process.platform === "win32" && process.arch === "x64") {
     return ["@velr-ai/runtime-win32-x64-msvc"];
@@ -91,7 +91,7 @@ function resolveMonorepoRuntime(): RuntimeResolution | null {
 
   const platformRoot =
     process.platform === "darwin"
-      ? "macos-universal"
+      ? process.arch === "arm64" ? "macos-aarch64" : "macos-x86_64"
       : process.platform === "win32"
         ? "windows-x86_64"
         : process.arch === "arm64"
