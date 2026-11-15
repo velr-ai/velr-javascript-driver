@@ -19,6 +19,13 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-22.04
+    env:
+      RUNTIME_PACKAGES: >-
+        runtime/darwin-arm64
+        runtime/darwin-x64
+        runtime/linux-arm64-gnu
+        runtime/linux-x64-gnu
+        runtime/win32-x64-msvc
     steps:
       - name: Checkout public repo
         uses: actions/checkout@v5
@@ -89,10 +96,10 @@ jobs:
             exit 1
           fi
 
-          for dir in runtime/darwin-universal runtime/linux-x64-gnu runtime/linux-arm64-gnu runtime/win32-x64-msvc; do
+          for dir in $RUNTIME_PACKAGES; do
             find "$dir" -type f | sort > /tmp/velr-runtime-files.txt
             case "$dir" in
-              runtime/darwin-universal)
+              runtime/darwin-arm64|runtime/darwin-x64)
                 expected="$(printf '%s\n' LICENSE.runtime README.md package.json prebuilt/libvelrc.dylib)"
                 ;;
               runtime/linux-x64-gnu|runtime/linux-arm64-gnu)
@@ -130,7 +137,7 @@ jobs:
           if bad:
               raise SystemExit("public npm package would include forbidden files:\n" + "\n".join(bad))
           PY
-          for dir in runtime/darwin-universal runtime/linux-x64-gnu runtime/linux-arm64-gnu runtime/win32-x64-msvc; do
+          for dir in $RUNTIME_PACKAGES; do
             (cd "$dir" && npm pack --dry-run --json)
           done
 
@@ -139,7 +146,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          for dir in runtime/darwin-universal runtime/linux-x64-gnu runtime/linux-arm64-gnu runtime/win32-x64-msvc; do
+          for dir in $RUNTIME_PACKAGES; do
             (cd "$dir" && npm publish --dry-run --access public)
           done
 
@@ -166,7 +173,7 @@ jobs:
               npm publish --access public
             )
           }
-          for dir in runtime/darwin-universal runtime/linux-x64-gnu runtime/linux-arm64-gnu runtime/win32-x64-msvc; do
+          for dir in $RUNTIME_PACKAGES; do
             publish_if_missing "$dir"
           done
 
