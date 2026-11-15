@@ -1,9 +1,6 @@
 name: npm-publish
 
 "on":
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       dry_run:
