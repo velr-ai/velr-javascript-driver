@@ -125,10 +125,20 @@ jobs:
           import json
           from pathlib import Path
 
-          pack = json.loads(Path("/tmp/velr-npm-pack.json").read_text())[0]
+          name = json.loads(Path("package.json").read_text())["name"]
+          report = json.loads(Path("/tmp/velr-npm-pack.json").read_text())
+          if isinstance(report, list) and len(report) == 1:
+              pack = report[0]
+          elif isinstance(report, dict) and report.keys() == {name}:
+              pack = report[name]
+          else:
+              raise SystemExit(f"expected one npm pack result for {name}")
+          files = pack.get("files") if isinstance(pack, dict) and pack.get("name") == name else None
+          if not isinstance(files, list) or not files:
+              raise SystemExit(f"npm pack result for {name} has no file list")
           bad = [
               f["path"]
-              for f in pack["files"]
+              for f in files
               if f["path"].startswith("runtime/")
               or f["path"].startswith("rust/")
               or f["path"].endswith(".rs")
