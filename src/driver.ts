@@ -26,6 +26,7 @@ import {
   type QueryOptionsRaw
 } from "./ffi/koffi.js";
 import { VelrError, VelrStateError, VelrTypeError } from "./errors.js";
+import { createQueryControl, workerQueryControl, type InternalQueryOptions } from "./query-control.js";
 import type {
   CellAsJsOptions,
   CellType,
@@ -92,24 +93,23 @@ function arrowIpcBuffer(bytes: Buffer | Uint8Array): Buffer {
 
 function withQueryOptions<T>(
   cypher: string,
-  options: QueryOptions | undefined,
-  run: (raw: QueryOptionsRaw | null) => T
+  options: InternalQueryOptions | undefined,
+  run: (raw: QueryOptionsRaw | null, control: NativePointer) => T
 ): T {
-  const { raw, paramsHandle } = buildQueryOptions(options?.maxResultRows, options?.params, cypher);
+  const borrowed = options?.[workerQueryControl];
+  const owned = borrowed === undefined && options?.timeoutMs !== undefined
+    ? createQueryControl(options.timeoutMs)
+    : undefined;
   try {
-    return run(raw);
+    const { raw, paramsHandle } = buildQueryOptions(options?.maxResultRows, options?.params, cypher);
+    try {
+      return run(raw, borrowed ?? owned?.ptr ?? null);
+    } finally {
+      freeQueryParams(paramsHandle);
+    }
   } finally {
-    freeQueryParams(paramsHandle);
+    owned?.free();
   }
-}
-
-function requiresNativeQueryOptions(options: QueryOptions | undefined): boolean {
-  if (!options) return false;
-  if (options.maxResultRows != null) return true;
-  const params = options.params;
-  if (params == null) return false;
-  if (typeof params !== "object" || Array.isArray(params)) return true;
-  return Object.keys(params).length > 0;
 }
 
 /**
@@ -131,7 +131,11 @@ export class Cell {
   /** Raw UTF-8 bytes for `text` and `json` cells. */
   readonly data: Buffer;
 
-  /** Create a cell value. Most users receive cells from query results. */
+  /**
+   * Create a cell with its kind and matching payload: `i64` for bool/int64,
+   * `f64` for double, and UTF-8 `data` for text/JSON. Defaults are zero/empty.
+   * Most applications receive cells from query results.
+   */
   constructor(type: CellType, i64 = 0n, f64 = 0, data: Buffer = Buffer.alloc(0)) {
     this.type = type;
     this.i64 = i64;
@@ -239,9 +243,12 @@ export class Velr implements ParentHandle {
   /**
    * Open a database for reading and writing.
    *
-   * Pass `null` or omit `path` for an in-memory database. Sidecar-backed
-   * features such as fulltext and vector indexes require a file-backed
-   * database.
+   * Pass `null` or omit `path` for an in-memory database. A file path opens or
+   * creates a persistent database. Fulltext and vector indexes require a
+   * file-backed database. Opening does not migrate older supported databases;
+   * use `needsMigration()` and `migrate()` before graph queries or transactions.
+   * Close the connection after its queries and results are finished. Invalid arguments
+   * throw `VelrTypeError`; open failures throw `VelrError`.
    */
   static open(path: string | null = null): Velr {
     if (path != null) ensureNoNul(path, "database path");
@@ -280,7 +287,12 @@ export class Velr implements ParentHandle {
     return new Velr(outDb[0]);
   }
 
-  /** Open an existing database in read-only mode. */
+  /**
+   * Open an existing supported database for reads, without creating,
+   * initializing, migrating, or repairing it. Migrate a supported older database
+   * on a writable connection, then reopen read-only connections before querying.
+   * Close when finished. Missing files and unsupported schemas throw `VelrError`.
+   */
   static openReadonly(path: string): Velr {
     ensureNoNul(path, "database path");
     const { lib } = getBindings();
@@ -364,7 +376,13 @@ export class Velr implements ParentHandle {
     return out[0] !== 0;
   }
 
-  /** Run any pending Velr schema migrations for this database. */
+  /**
+   * Explicitly migrate a writable database to the current schema and return
+   * its versions, status, and applied steps. Call from maintenance code outside
+   * an active transaction; read-only or failed migrations throw `VelrError`.
+   * Migrate supported older databases before graph queries or transactions;
+   * reopen read-only connections after another connection migrates the file.
+   */
   migrate(): MigrationReport {
     const report: MigrationReportRaw = {};
     const outErrValue = outPtr();
@@ -383,7 +401,11 @@ export class Velr implements ParentHandle {
     }
   }
 
-  /** Compact a writable, current-schema database file with Velr's maintenance vacuum. */
+  /**
+   * Compact a writable current-schema database file outside any open
+   * transaction. Returns no value; unmet prerequisites and maintenance
+   * failures throw `VelrError`.
+   */
   vacuum(): void {
     const vacuum = getBindings().lib.velr_vacuum;
     if (!vacuum) {
@@ -398,8 +420,13 @@ export class Velr implements ParentHandle {
    *
    * Embedder-backed vector indexes reference this name from
    * `CREATE VECTOR INDEX ... OPTIONS { indexConfig: { embedder: 'name' } }`.
-   * Velr calls the callback when indexed source values change and when text
-   * query payloads need embeddings.
+   * Register it separately on each connection that needs embeddings, including
+   * after reopening a database; registration is not persisted with the file.
+   * Registration itself, index creation/recovery, indexed writes or their
+   * commit, and text queries through vector procedures can request embeddings.
+   * Register before performing those operations. If an embedder-backed index
+   * has pending transaction updates, searching it fails until the transaction
+   * commits or rolls back.
    *
    * Stored-vector indexes, such as `CREATE VECTOR INDEX ... ON (n.embedding)`,
    * index the vector/list property directly and do not use a registered
@@ -411,13 +438,19 @@ export class Velr implements ParentHandle {
    * `ON EACH [...]` indexes, `embedder_fingerprint` stores application model/version metadata,
    * and `cache_policy` controls embedder-output caching with `required`, `best_effort`, or
    * `none`. It defaults to `required` with an embedder and `none` without one. Stored-vector
-   * indexes require `none`. HNSW tuning uses `` `vector.hnsw.m` `` (`1..512` neighbor links per
-   * vector), `` `vector.hnsw.ef_construction` `` (`1..3200` build candidates per inserted
-   * vector), and `` `vector.hnsw.ef_search` `` (`1..3200` query candidates; default `64`). Velr
-   * manages the scalar format and storage/cache engines internally.
+   * indexes require `none`. HNSW tuning uses `` `vector.hnsw.m` `` (`1..512`),
+   * `` `vector.hnsw.ef_construction` `` (`1..3200`), and
+   * `` `vector.hnsw.ef_search` `` (`1..3200`; default `64`). Velr validates
+   * embedding dimensions and finite values.
    *
    * Direct-driver callbacks must return synchronously. Use `VelrWorker` when
-   * your embedder needs asynchronous work.
+   * your embedder needs asynchronous work. Registration retains the callback
+   * until replacement or connection close. Return one finite vector per input
+   * in input order and with the requested dimensions. Do not call the same
+   * connection from the callback; its failure fails the requesting operation.
+   * Names must be nonempty and contain no NUL. Invalid names or callbacks throw
+   * `VelrTypeError`; a closed connection throws `VelrStateError`. Unavailable
+   * runtime support or registration/index failures throw `VelrError`.
    */
   registerVectorEmbedder(name: string, embedder: VectorEmbedder): void {
     if (typeof name !== "string") throw new VelrTypeError("vector embedder name must be a string");
@@ -451,7 +484,8 @@ export class Velr implements ParentHandle {
    * Bind an Arrow IPC file/Feather v2 payload as a logical table.
    *
    * The bytes are borrowed only for the duration of the call. IPC streams are
-   * not accepted by the current ABI.
+   * not accepted. Query the name with `UNWIND BIND('name') AS row`.
+   * Invalid arguments throw `VelrTypeError`; import failures throw `VelrError`.
    */
   bindArrowIpc(logical: string, ipcBytes: Buffer | Uint8Array): void {
     ensureNoNul(logical, "logical table name");
@@ -472,15 +506,23 @@ export class Velr implements ParentHandle {
    *
    * Close the returned stream when finished, or use `run()`/`query()` for common
    * one-shot workflows.
-   * Throws `VelrError` for query failures. Result iteration can also throw.
+   * A timeout covers execution and result iteration. Both can throw `VelrError`.
    */
   exec(cypher: string, options?: QueryOptions): Stream {
     ensureNoNul(cypher, "openCypher");
     const { lib } = getBindings();
-    return withQueryOptions(cypher, options, (raw) => {
+    return withQueryOptions(cypher, options, (raw, control) => {
       const outStream = outPtr();
       const outErrValue = outPtr();
-      if (raw) {
+      if (!isNullPointer(control)) {
+        if (!lib.velr_exec_start_with_control) {
+          throw new VelrError("loaded Velr runtime does not support query cancellation or deadlines");
+        }
+        check(
+          lib.velr_exec_start_with_control(this.ptr(), cypher, raw, control, outStream, outErrValue),
+          outErrValue
+        );
+      } else if (raw) {
         if (!lib.velr_exec_start_with_options) {
           throw new VelrError("loaded Velr runtime does not expose velr_exec_start_with_options");
         }
@@ -502,14 +544,25 @@ export class Velr implements ParentHandle {
    * Execute Cypher and return exactly one result table.
    *
    * Throws when the statement produces no tables or multiple tables.
+   * A timeout covers execution and row reads, which can throw `VelrError`.
+   * Close the table before its parent connection or transaction closes. Its
+   * parent closes any remaining result handles automatically.
    */
   execOne(cypher: string, options?: QueryOptions): Table {
     ensureNoNul(cypher, "openCypher");
     const { lib } = getBindings();
-    return withQueryOptions(cypher, options, (raw) => {
+    return withQueryOptions(cypher, options, (raw, control) => {
       const outTable = outPtr();
       const outErrValue = outPtr();
-      if (raw) {
+      if (!isNullPointer(control)) {
+        if (!lib.velr_exec_one_with_control) {
+          throw new VelrError("loaded Velr runtime does not support query cancellation or deadlines");
+        }
+        check(
+          lib.velr_exec_one_with_control(this.ptr(), cypher, raw, control, outTable, outErrValue),
+          outErrValue
+        );
+      } else if (raw) {
         if (!lib.velr_exec_one_with_options) {
           throw new VelrError("loaded Velr runtime does not expose velr_exec_one_with_options");
         }
@@ -531,19 +584,23 @@ export class Velr implements ParentHandle {
    * Execute Cypher and discard all result tables.
    *
    * This is the preferred helper for DDL and writes where no rows are needed.
+   * Pass `timeoutMs` to set an execution deadline.
    */
   run(cypher: string, options?: QueryOptions): void {
     ensureNoNul(cypher, "openCypher");
     const { lib } = getBindings();
-    const hasOptions = requiresNativeQueryOptions(options);
-    if (!hasOptions) {
+    withQueryOptions(cypher, options, (raw, control) => {
       const outErrValue = outPtr();
-      check(lib.velr_run(this.ptr(), cypher, outErrValue), outErrValue);
-      return;
-    }
-    withQueryOptions(cypher, options, (raw) => {
-      const outErrValue = outPtr();
-      check(lib.velr_run_with_options(this.ptr(), cypher, raw!, outErrValue), outErrValue);
+      if (!isNullPointer(control)) {
+        if (!lib.velr_run_with_control) {
+          throw new VelrError("loaded Velr runtime does not support query cancellation or deadlines");
+        }
+        check(lib.velr_run_with_control(this.ptr(), cypher, raw, control, outErrValue), outErrValue);
+      } else if (raw) {
+        check(lib.velr_run_with_options(this.ptr(), cypher, raw, outErrValue), outErrValue);
+      } else {
+        check(lib.velr_run(this.ptr(), cypher, outErrValue), outErrValue);
+      }
     });
   }
 
@@ -557,6 +614,16 @@ export class Velr implements ParentHandle {
    *
    * The transaction commits when `fn` returns successfully and rolls back when
    * `fn` throws, unless the callback has already committed or rolled back.
+   * The callback must be synchronous: a returned promise is not awaited.
+   * Use `VelrWorker.transaction()` for asynchronous callbacks. The return value
+   * of `fn` is returned unchanged; transaction failures throw `VelrError`.
+   * Consume and close result handles before the callback ends; copied cells,
+   * objects, and explain snapshots can outlive it. Only one transaction may be
+   * active on a connection. Use the supplied transaction until it finishes;
+   * use a separate connection for independent work. A writable transaction
+   * reserves the writer slot; use a transaction on a separate read-only
+   * connection for a snapshot while another connection writes.
+   * Callback errors propagate unless rollback cleanup itself throws.
    */
   transaction<T>(fn: (tx: VelrTx) => T): T {
     const tx = this.beginTx();
@@ -577,6 +644,10 @@ export class Velr implements ParentHandle {
    * Execute Cypher and convert the single result table into objects.
    *
    * Column names become object keys and cell conversion follows `Cell.asJs()`.
+   * Use unique result aliases; Cypher rejects duplicate result column names.
+   * The generic `T` is a caller assertion, without runtime shape validation.
+   * Collects all rows in memory and closes the table on success or failure.
+   * A timeout covers execution and collection; errors throw `VelrError`.
    */
   query<T extends Record<string, unknown> = Record<string, unknown>>(
     cypher: string,
@@ -590,7 +661,16 @@ export class Velr implements ParentHandle {
     }
   }
 
-  /** Build an explain trace without executing the query. */
+  /**
+   * Build an explain trace without executing the query.
+   *
+   * Accepts query text only, without parameter bindings or query options.
+   * Keep this connection and the returned trace open while reading it; closing
+   * either invalidates the trace. Close the trace when finished. Its copied
+   * `snapshot()` and `toCompactString()` results survive handle closure.
+   * Invalid query text or runtime failures throw `VelrError`, invalid host
+   * arguments throw `VelrTypeError`, and a closed connection throws `VelrStateError`.
+   */
   explain(cypher: string): ExplainTrace {
     ensureNoNul(cypher, "openCypher");
     const outTrace = outPtr();
@@ -599,7 +679,17 @@ export class Velr implements ParentHandle {
     return this.adoptTrace(outTrace[0], "velr_explain");
   }
 
-  /** Execute the query and return an analyzed explain trace. */
+  /**
+   * Execute the query, including its writes, and return an analyzed explain trace.
+   *
+   * Accepts query text only, without parameter bindings or query options.
+   * Use `VelrTx.explainAnalyze()` and roll back that transaction when analysis
+   * writes should be discarded. Keep this connection and the trace open while
+   * reading it, then close the trace. Copied snapshots and strings survive
+   * closure; the live trace does not. Query/runtime failures throw `VelrError`,
+   * invalid host arguments throw `VelrTypeError`, and a closed connection
+   * throws `VelrStateError`.
+   */
   explainAnalyze(cypher: string): ExplainTrace {
     ensureNoNul(cypher, "openCypher");
     const outTrace = outPtr();
@@ -611,7 +701,18 @@ export class Velr implements ParentHandle {
     return this.adoptTrace(outTrace[0], "velr_explain_analyze");
   }
 
-  /** Start an explicit transaction. Call `commit()` or `rollback()` when done. */
+  /**
+   * Start the connection's single explicit transaction.
+   *
+   * Use its execution methods until it finishes. A writable transaction reserves
+   * the writer slot when started. For a snapshot while another connection writes,
+   * use a separate read-only connection and begin its transaction there.
+   * Close result handles before `commit()` or `rollback()`, which consume the
+   * transaction and close remaining children. `close()` rolls back uncommitted
+   * work. Keep this connection open until finalization. An already-active
+   * transaction or begin failure throws `VelrError`; a closed connection throws
+   * `VelrStateError`. Use savepoints for nested scopes.
+   */
   beginTx(): VelrTx {
     const outTx = outPtr();
     const outErrValue = outPtr();
@@ -733,7 +834,10 @@ export class Stream implements ChildHandle, Iterable<Table> {
  * One result table returned by a query.
  *
  * A table exposes column metadata, row cursors, eager collection helpers, and
- * Arrow IPC export.
+ * Arrow IPC export. Close it when finished. Tables from `exec()` require the
+ * producing stream to remain open; tables from `execOne()` require their
+ * connection or transaction to remain open. Closing any parent invalidates
+ * its child handles. Copied `Cell` and JavaScript values remain usable.
  */
 export class Table implements ChildHandle {
   #ptr: NativePointer;
@@ -766,7 +870,11 @@ export class Table implements ChildHandle {
     return names;
   }
 
-  /** Open a streaming row cursor for this table. */
+  /**
+   * Open a row cursor; keep this table and its parents open until the cursor
+   * closes. Close the cursor on success, error, or early exit. Fetching can
+   * throw `VelrError`; returned cells own their bytes and remain usable.
+   */
   rows(): Rows {
     const outRows = outPtr();
     const outErrValue = outPtr();
@@ -777,7 +885,16 @@ export class Table implements ChildHandle {
     return rows;
   }
 
-  /** Visit every row in order and close the row cursor afterwards. */
+  /**
+   * Visit every row in order with `fn(row, zeroBasedIndex)`.
+   *
+   * The callback runs synchronously; returned promises are not awaited. Use
+   * the worker API when each callback must finish asynchronous work before
+   * visiting the next row. A thrown callback error stops iteration and
+   * propagates; fetch errors can also throw `VelrError`. The temporary cursor
+   * always closes, while the caller still owns the table. Copied cells remain
+   * usable after iteration and handle closure.
+   */
   forEachRow(fn: (row: readonly Cell[], index: number) => void): void {
     const rows = this.rows();
     try {
@@ -794,7 +911,14 @@ export class Table implements ChildHandle {
   /**
    * Collect all rows into an array.
    *
-   * Without a mapper, each row is returned as a fresh `Cell[]`.
+   * Without a mapper, each row is returned as a fresh `Cell[]`. `map` receives
+   * the row cells and a zero-based index and returns one output per row. It
+   * runs synchronously: returned promises become array entries and are not
+   * awaited. The worker API awaits asynchronous mappers. A thrown mapper
+   * error stops collection and propagates; fetching can throw `VelrError`.
+   * Collects all output in memory and always closes the temporary cursor;
+   * the caller still owns the table. Returned cells and copied values survive
+   * closing the table or its parents.
    */
   collect<T = Cell[]>(map?: RowMapper<T>): T[] {
     const out: T[] = [];
@@ -807,7 +931,10 @@ export class Table implements ChildHandle {
   /**
    * Convert all rows into objects keyed by column name.
    *
-   * Cell values are converted using `Cell.asJs(options)`.
+   * Cell values follow `Cell.asJs(options)`. Use unique result aliases;
+   * Cypher rejects duplicate result column names. The generic `T` does
+   * not validate result shapes. All rows are collected in memory. Fetch and
+   * conversion failures propagate; the temporary cursor always closes.
    */
   toObjects<T extends Record<string, unknown> = Record<string, unknown>>(
     options: CellAsJsOptions = {}
@@ -822,7 +949,22 @@ export class Table implements ChildHandle {
     });
   }
 
-  /** Export this table as an Arrow IPC file/Feather v2 buffer. */
+  /**
+   * Export this table as an owned Arrow IPC file/Feather v2 `Buffer`.
+   *
+   * The buffer remains usable after this table and its parents close. No
+   * Apache Arrow JavaScript dependency is needed for this method. Export can
+   * materialize the entire result and allocate memory proportional to its size.
+   *
+   * Column types are inferred for this result: numeric columns may be integers
+   * or floating-point, and incompatible mixed kinds become strings. Cypher
+   * lists, maps, nodes, relationships, and paths become JSON strings in UTF-8
+   * columns, rather than nested Arrow arrays. Nulls remain null; empty/all-null
+   * columns use UTF-8 strings. Inspect the exported schema before assuming a dtype.
+   *
+   * Throws `VelrError` for a closed table, unavailable runtime support, or a
+   * row-read, conversion, or export failure.
+   */
   toArrowIpc(): Buffer {
     const { lib } = getBindings();
     if (!lib.velr_table_ipc_file_malloc) {
@@ -844,7 +986,11 @@ export class Table implements ChildHandle {
   /**
    * Convert this table to an Apache Arrow table.
    *
-   * Requires the optional `apache-arrow` peer dependency.
+   * Requires the optional `apache-arrow` peer dependency. Uses the schema and
+   * structured-value conversion described by `toArrowIpc()`. Keep this table
+   * and its parents open until the promise resolves; the returned Arrow table
+   * then owns its data independently. The promise rejects on a missing peer
+   * dependency, incompatible Arrow API, or result export/conversion failure.
    */
   async toArrowTable(): Promise<unknown> {
     const arrow = await import("apache-arrow");
@@ -966,8 +1112,13 @@ export class Rows implements ChildHandle, Iterable<Cell[]> {
 /**
  * Explain or explain-analyze trace returned by Velr.
  *
- * The indexed methods expose the native trace lazily. Use `snapshot()` to copy
- * the whole trace into plain JavaScript objects.
+ * Keep this trace and its owning connection or transaction open while reading
+ * it, on the same thread. Closing either parent or trace invalidates the live
+ * trace; subsequent reads throw `VelrStateError`. Close the trace explicitly.
+ * Indexed methods read individual entries; `snapshot()` copies the whole trace
+ * into plain JavaScript objects. Copied snapshots, metadata, and compact strings
+ * remain valid after handle closure. Runtime/read failures throw `VelrError`.
+ * Explain output is diagnostic text/data and may change between releases.
  */
 export class ExplainTrace implements ChildHandle {
   #ptr: NativePointer;
@@ -1171,14 +1322,25 @@ export class VelrTx implements ParentHandle, ChildHandle {
     return isNullPointer(this.#ptr);
   }
 
-  /** Execute Cypher inside this transaction and return a stream of result tables. */
+  /**
+   * Execute Cypher inside this transaction and return a stream of result tables.
+   * A timeout covers execution and result fetching. Close the stream when finished.
+   */
   exec(cypher: string, options?: QueryOptions): StreamTx {
     ensureNoNul(cypher, "openCypher");
     const { lib } = getBindings();
-    return withQueryOptions(cypher, options, (raw) => {
+    return withQueryOptions(cypher, options, (raw, control) => {
       const outStream = outPtr();
       const outErrValue = outPtr();
-      if (raw) {
+      if (!isNullPointer(control)) {
+        if (!lib.velr_tx_exec_start_with_control) {
+          throw new VelrError("loaded Velr runtime does not support query cancellation or deadlines");
+        }
+        check(
+          lib.velr_tx_exec_start_with_control(this.ptr(), cypher, raw, control, outStream, outErrValue),
+          outErrValue
+        );
+      } else if (raw) {
         if (!lib.velr_tx_exec_start_with_options) {
           throw new VelrError("loaded Velr runtime does not expose velr_tx_exec_start_with_options");
         }
@@ -1202,6 +1364,9 @@ export class VelrTx implements ParentHandle, ChildHandle {
    * Execute Cypher inside this transaction and return exactly one result table.
    *
    * Throws when the statement produces no tables or multiple tables.
+   * A timeout covers execution and row reads, which can throw `VelrError`.
+   * Close the table before its parent connection or transaction closes. Its
+   * parent closes any remaining result handles automatically.
    */
   execOne(cypher: string, options?: QueryOptions): Table {
     const stream = this.exec(cypher, options);
@@ -1228,19 +1393,22 @@ export class VelrTx implements ParentHandle, ChildHandle {
     }
   }
 
-  /** Execute Cypher inside this transaction and discard all result tables. */
+  /** Execute Cypher inside this transaction and discard all result tables. Supports deadlines. */
   run(cypher: string, options?: QueryOptions): void {
     ensureNoNul(cypher, "openCypher");
     const { lib } = getBindings();
-    const hasOptions = requiresNativeQueryOptions(options);
-    if (!hasOptions) {
+    withQueryOptions(cypher, options, (raw, control) => {
       const outErrValue = outPtr();
-      check(lib.velr_tx_run(this.ptr(), cypher, outErrValue), outErrValue);
-      return;
-    }
-    withQueryOptions(cypher, options, (raw) => {
-      const outErrValue = outPtr();
-      check(lib.velr_tx_run_with_options(this.ptr(), cypher, raw!, outErrValue), outErrValue);
+      if (!isNullPointer(control)) {
+        if (!lib.velr_tx_run_with_control) {
+          throw new VelrError("loaded Velr runtime does not support query cancellation or deadlines");
+        }
+        check(lib.velr_tx_run_with_control(this.ptr(), cypher, raw, control, outErrValue), outErrValue);
+      } else if (raw) {
+        check(lib.velr_tx_run_with_options(this.ptr(), cypher, raw, outErrValue), outErrValue);
+      } else {
+        check(lib.velr_tx_run(this.ptr(), cypher, outErrValue), outErrValue);
+      }
     });
   }
 
@@ -1271,6 +1439,7 @@ export class VelrTx implements ParentHandle, ChildHandle {
 
   /**
    * Execute Cypher inside this transaction and convert one result table into objects.
+   * A timeout covers execution and collection.
    */
   query<T extends Record<string, unknown> = Record<string, unknown>>(
     cypher: string,
@@ -1284,7 +1453,15 @@ export class VelrTx implements ParentHandle, ChildHandle {
     }
   }
 
-  /** Build an explain trace inside this transaction without executing the query. */
+  /**
+   * Explain query text inside this transaction without executing it.
+   *
+   * Parameter bindings and query options are not accepted. The returned trace
+   * requires this transaction and its connection to stay open; close it before
+   * finalizing the transaction. Copied snapshots and compact strings remain
+   * usable afterward. Query/runtime failures throw `VelrError`, invalid host
+   * arguments throw `VelrTypeError`, and a closed transaction throws `VelrStateError`.
+   */
   explain(cypher: string): ExplainTrace {
     ensureNoNul(cypher, "openCypher");
     const outTrace = outPtr();
@@ -1293,7 +1470,16 @@ export class VelrTx implements ParentHandle, ChildHandle {
     return this.adoptTrace(outTrace[0], "velr_tx_explain");
   }
 
-  /** Execute the query inside this transaction and return an analyzed explain trace. */
+  /**
+   * Execute and profile query text inside this transaction, including writes.
+   *
+   * Changes remain part of this transaction; commit or roll back normally.
+   * Parameter bindings and query options are not accepted. Keep this transaction,
+   * its connection, and the returned trace open while reading, then close the
+   * trace before finalizing the transaction. Copied snapshots and strings survive
+   * closure. Query/runtime failures throw `VelrError`, invalid host arguments
+   * throw `VelrTypeError`, and a closed transaction throws `VelrStateError`.
+   */
   explainAnalyze(cypher: string): ExplainTrace {
     ensureNoNul(cypher, "openCypher");
     const outTrace = outPtr();
@@ -1320,7 +1506,9 @@ export class VelrTx implements ParentHandle, ChildHandle {
    * Run a function inside an anonymous savepoint.
    *
    * The savepoint is released when `fn` returns successfully and rolled back
-   * when `fn` throws, unless the callback already consumed it.
+   * when `fn` throws, unless the callback already consumed it. Return values
+   * are passed through. The callback must be synchronous; promises are not
+   * awaited. Use the worker API for async callbacks.
    */
   withSavepoint<T>(fn: (savepoint: Savepoint) => T): T {
     const savepoint = this.savepoint();
@@ -1364,7 +1552,8 @@ export class VelrTx implements ParentHandle, ChildHandle {
    * Run a function inside a named savepoint.
    *
    * The savepoint is released on success and rolled back on failure, unless the
-   * callback already consumed it.
+   * callback already consumed it. The callback must be synchronous; promises
+   * are not awaited. Use the worker API for async callbacks.
    */
   withSavepointNamed<T>(name: string, fn: (savepoint: Savepoint) => T): T {
     const savepoint = this.savepointNamed(name);
@@ -1731,10 +1920,12 @@ export class Savepoint implements ChildHandle {
   }
 
   /**
-   * Close the savepoint handle without releasing or rolling back it explicitly.
+   * Close this handle; calling it more than once is safe.
    *
-   * Prefer `release()` or `rollback()` when the desired transaction behavior is
-   * known.
+   * An active anonymous savepoint rolls back changes after it and releases
+   * itself. Closing a named handle leaves its transaction-owned savepoint
+   * active; use `releaseSavepoint(name)` or `rollbackTo(name)` on the
+   * transaction, or `release()` / `rollback()` before closing the handle.
    */
   close(): void {
     if (this.#named) {

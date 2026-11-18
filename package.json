@@ -1,6 +1,6 @@
 {
   "name": "@velr-ai/velr",
-  "version": "0.2.61",
+  "version": "0.2.62",
   "description": "JavaScript and TypeScript bindings for Velr, an embedded openCypher graph database built on SQLite",
   "license": "MIT",
   "type": "module",
@@ -24,6 +24,9 @@
     "dist",
     "examples",
     "README.md",
+    "QUERY_LANGUAGE.md",
+    "API.md",
+    "GUIDE.md",
     "LICENSE",
     "LICENSE.runtime"
   ],
@@ -32,10 +35,17 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "rimraf dist && tsup",
+    "build": "rimraf dist && tsup && node scripts/public-declarations.mjs && npm run typecheck:public",
     "clean": "rimraf dist",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "docs:api": "node scripts/api-reference.mjs",
+    "docs:check": "node scripts/api-reference.mjs --check",
+    "docs:examples:check": "node --test scripts/check-doc-examples.test.mjs && node scripts/check-doc-examples.mjs --inventory-only",
+    "docs:test": "node scripts/check-doc-examples.mjs",
+    "prebuild": "npm run docs:check",
+    "pretest": "npm run docs:check",
+    "typecheck:public": "tsc --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext scripts/public-api-check.ts"
   },
   "dependencies": {
     "koffi": ">=2.11.0 <4"
@@ -49,14 +59,15 @@
     }
   },
   "optionalDependencies": {
-    "@velr-ai/runtime-darwin-arm64": "0.2.61",
-    "@velr-ai/runtime-darwin-x64": "0.2.61",
-    "@velr-ai/runtime-linux-x64-gnu": "0.2.61",
-    "@velr-ai/runtime-linux-arm64-gnu": "0.2.61",
-    "@velr-ai/runtime-win32-x64-msvc": "0.2.61"
+    "@velr-ai/runtime-darwin-arm64": "0.2.62",
+    "@velr-ai/runtime-darwin-x64": "0.2.62",
+    "@velr-ai/runtime-linux-x64-gnu": "0.2.62",
+    "@velr-ai/runtime-linux-arm64-gnu": "0.2.62",
+    "@velr-ai/runtime-win32-x64-msvc": "0.2.62"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "apache-arrow": "15.0.2",
     "rimraf": "^6.0.1",
     "tsup": "^8.3.0",
     "typescript": "^5.7.0",

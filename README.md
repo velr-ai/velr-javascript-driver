@@ -1,952 +1,633 @@
-# Velr
+# Velr for JavaScript and TypeScript
 
-Velr is an embedded property-graph database from Velr.ai, queried using openCypher.
+Velr is an embedded property-graph database queried with openCypher. This Node.js
+package includes the database runtime, a synchronous API, and an asynchronous
+worker API. Databases can live in memory or in a local file. Use the
+[driver guide](GUIDE.md) for detailed workflows and the [API reference](API.md)
+for complete method and option contracts.
 
-It runs in-process and is designed for local, embedded, and edge use cases.
+## Requirements and installation
 
-This package provides the **JavaScript and TypeScript bindings** for Velr and
-bundles the database runtime. It exposes an idiomatic Node.js API for executing Cypher queries, streaming result
-tables, working with transactions, using worker threads, and exporting or
-binding Arrow IPC data.
+- Node.js 22 or newer. Browsers are unsupported.
+- Bundled runtimes: macOS arm64/x86_64, Linux arm64/x86_64 with glibc, and Windows
+  x86_64. Linux musl environments, including Alpine, are unsupported by these bundles.
+- Keep npm optional dependencies enabled; they supply the runtime for your platform.
+- `SEARCH` and creation options below require Velr runtime 0.2.62 or newer.
+  Use a driver and runtime from the same release.
 
-For the main Velr public entry point, see
-[velr-ai/velr](https://github.com/velr-ai/velr).  
-For the Velr website, see [velr.ai](https://velr.ai/).
-
-## Community
-
-- **Community and questions:** [GitHub Discussions](https://github.com/velr-ai/velr/discussions)
-- **Bug reports and feature requests:** [GitHub Issues](https://github.com/velr-ai/velr/issues)
-- **JavaScript examples:** [velr-ai/velr-javascript-examples](https://github.com/velr-ai/velr-javascript-examples)
-- **TypeScript examples:** [velr-ai/velr-typescript-examples](https://github.com/velr-ai/velr-typescript-examples)
-
-We'd love to have you join the Velr community.
-
----
-
-## Compatibility
-
-Databases created before Velr 0.2.14 must be recreated by re-importing the source
-data.
-
-### Schema version 11 compatibility
-
-New databases use schema version 11. Databases at schema versions 3 through 9
-require an [explicit migration](#schema-migration) before graph queries can run.
-
-Create fulltext and vector indexes with Cypher DDL and query them with `CALL`.
-
----
-
-## Installation
-
-The driver requires Node.js 22 or newer.
-
-Install from npm:
-
-```bash
+```sh
 npm install @velr-ai/velr
 ```
 
-The npm package selects a bundled native runtime for supported platforms during
-installation. Users should not need to download or configure `.dll`, `.so`, or
-`.dylib` files manually.
+TypeScript declarations and API comments are included. TypeScript users need
+TypeScript 5.2 or newer for explicit resource management, a compiler compatible
+with their installed Node.js types, and `ESNext.Disposable` in the compiler
+`lib` list. The examples below are JavaScript and also work in TypeScript.
+Apache Arrow is optional; install `apache-arrow` 15 or newer for `toArrowTable()`:
 
-For Arrow table conversion workflows, install Apache Arrow:
-
-```bash
+```sh
 npm install apache-arrow
 ```
 
-### Licensing in simple terms
-
-- The **JavaScript and TypeScript binding source code** in this package is
-  licensed under **MIT**.
-- The **bundled native runtime binaries** may be **used and freely
-  redistributed in unmodified form** under the terms of **`LICENSE.runtime`**.
-
----
+See the [TypeScript setup guide](GUIDE.md#running-the-typescript-examples) for
+a complete compiler configuration, including the optional Arrow types.
 
 ## Quick start
 
-```ts
+Save this as `example.mjs` and run `node example.mjs`:
+
+```js
 import { Velr } from "@velr-ai/velr";
 
-const MOVIES_CREATE = `
-CREATE
-  (keanu:Person:Actor {name:'Keanu Reeves', born:1964}),
-  (nolan:Person:Director {name:'Christopher Nolan'}),
-  (matrix:Movie {title:'The Matrix', released:1999, genres:['Sci-Fi','Action']}),
-  (inception:Movie {title:'Inception', released:2010, genres:['Sci-Fi','Heist']}),
-  (keanu)-[:ACTED_IN {roles:['Neo']}]->(matrix),
-  (nolan)-[:DIRECTED]->(inception);
-`;
-
-using db = Velr.open(null);
-db.run(MOVIES_CREATE);
-
-const table = db.execOne(
-  "MATCH (m:Movie {title:'Inception'}) " +
-    "RETURN m.title AS title, m.released AS year, m.genres AS genres"
-);
-
+const db = Velr.open();
 try {
-  console.log(table.columnNames());
-  console.log(table.toObjects({ int64: "number" }));
+  db.run("CREATE (:Person {name: $name, born: $born})", {
+    params: { name: "Keanu Reeves", born: 1964 },
+  });
+  const rows = db.query(
+    "MATCH (p:Person {name: $name}) RETURN p.name AS name, p.born AS born",
+    { params: { name: "Keanu Reeves" } },
+  );
+  console.log(rows[0].name, rows[0].born); // Keanu Reeves 1964
 } finally {
-  table.close();
+  db.close();
 }
 ```
 
-Open a file-backed database instead of an in-memory database:
+Each JavaScript example below is a standalone ES module. Save it as an `.mjs`
+file and run it with Node.js; every opened handle is closed when finished.
 
-```ts
+## Queries and results
+
+### In-memory, persistent, and read-only databases
+
+`Velr.open()` creates a private in-memory database. Pass a path to open or create
+a persistent database. Parent directories must exist. A read-only connection
+requires an existing supported database and never creates, initializes, migrates,
+or repairs it:
+
+```js
 import { Velr } from "@velr-ai/velr";
 
-using db = Velr.open("mygraph.db");
-db.run("CREATE (:Person {name:'Alice'})");
-```
-
-Open an existing database for reads only:
-
-```ts
-import { Velr } from "@velr-ai/velr";
-
-using db = Velr.openReadonly("mygraph.db");
-const rows = db.query("MATCH (n) RETURN count(n) AS count", { int64: "number" });
-console.log(rows);
-```
-
-`openReadonly()` never creates, initializes, migrates, or repairs a database.
-The file must already exist and have a supported Velr schema version. After
-migrating an older database on a writable connection, reopen any read-only
-connections before querying it.
-
-### Inline edge properties
-
-Use `Velr.create()` to choose a frequently used relationship property, such
-as a numeric timestamp. The choice applies to that name across all
-relationship types.
-
-```ts
-import { Velr } from "@velr-ai/velr";
-
-{
-  using db = Velr.create("events.db", { inlineEdgeProperties: ["timestamp"] });
-  db.run("CREATE ()-[:EVENT {timestamp: 1700000000}]->()");
-}
-
-using db = Velr.openReadonly("events.db");
-console.log(db.inlineEdgeProperties()); // ["timestamp"]
-console.log(db.query("MATCH ()-[r:EVENT]->() RETURN r.timestamp AS timestamp"));
-// [{ timestamp: 1700000000 }]
-```
-
-Use a new file path and pass at most one name. The selection is fixed when
-the database is created. Omit the list or pass an empty list to leave inline
-edge properties disabled. Velr can inline integers, floating-point numbers,
-and strings up to 128 UTF-8 bytes. Values too large to inline still work with
-the same Cypher reads and writes.
-
-`VelrWorker.create()` and `inlineEdgeProperties()` provide the same
-operations as promises in the worker driver.
-
----
-
-## Schema migration
-
-Open the database on a writable connection and call `migrate()` or run
-`MIGRATE DATABASE` outside an active transaction.
-
-```ts
-import { Velr } from "@velr-ai/velr";
-
-using db = Velr.open("mygraph.db");
-
-if (db.needsMigration()) {
-  const report = db.migrate();
-  console.log(report.status, report.fromVersion, report.toVersion, report.steps);
-}
-```
-
-The equivalent Cypher command is useful for scripts and tools that already work
-through query execution:
-
-```ts
-using db = Velr.open("mygraph.db");
-const report = db.query("MIGRATE DATABASE");
-console.log(report);
-```
-
-## Maintenance
-
-After large deletes or prune operations on a file-backed database, call
-`db.vacuum()` from maintenance code when you want to compact the database file:
-
-```ts
-using db = Velr.open("mygraph.db");
-db.run("MATCH (n:Expired) DETACH DELETE n");
-db.vacuum();
-```
-
-`vacuum()` must run on a writable current-schema connection outside an open
-transaction. The equivalent command for scripts is `VACUUM DATABASE`.
-
----
-
-## Introspection
-
-Use `SHOW CURRENT GRAPH SHAPE` to inspect the observed schema of the graph. It
-reports the shape present in stored data: node labels, relationship types,
-properties, observed value types, and counts. It is an observed shape surface,
-not a declared GQL graph type.
-
-The default projection returns `element_kind`, `element_name`, `property_name`,
-`observed_type`, `owner_count`, `present_count`, and `missing_count`. `YIELD *`
-exposes the full row shape, including `surface`, `source_label`, `target_label`,
-`required`, `storage_class`, and `tag`.
-
-```ts
-using db = Velr.open("mygraph.db");
-
-const rows = db.query(
-  `
-  SHOW CURRENT GRAPH SHAPE
-  YIELD element_kind, element_name, property_name, observed_type, owner_count
-  WHERE element_kind = 'node_property'
-  RETURN element_name, property_name, observed_type, owner_count
-  `,
-  { int64: "number" }
-);
-
-console.log(rows);
-```
-
-Use `YIELD` to compose the command with `WHERE` and `RETURN`. Plain
-`SHOW CURRENT GRAPH SHAPE` returns the default projection; `YIELD *` exposes the
-full current row shape.
-
----
-
-## Fulltext Search
-
-Fulltext search is available through normal Cypher execution. Define indexes
-with `CREATE FULLTEXT INDEX` and query them with
-`CALL db.index.fulltext.queryNodes(...)`.
-
-```ts
-using db = Velr.open("mygraph.db");
-
-db.run(`
-  CREATE FULLTEXT INDEX paperText
-  FOR (n:Paper) ON EACH [n.title, n.abstract]
-`);
-
-const rows = db.query(`
-  CALL db.index.fulltext.queryNodes('paperText', 'abstract:vector')
-  YIELD node, score
-  RETURN node, score
-`);
-```
-
-The query string supports this fulltext grammar:
-
-- Terms: `vector search`
-- Phrases: `"vector search"`
-- Field scoping by indexed property: `title:graph`, `abstract:"vector search"`
-- Boolean operators and grouping: `graph AND (vector OR semantic)`
-- Default `OR` between adjacent terms: `vector search`
-- Required and excluded terms: `+vector -draft`
-- Phrase slop: `"vector search"~2`
-- Phrase prefix on the last phrase term: `"vector sea"*`
-- Boosts: `title:graph^2.0`
-- Match all indexed nodes: `*`
-
-Field scoping applies to the next term or phrase only. For example,
-`title:graph search` searches `graph` in `title` and `search` in the default
-fulltext field.
-
-`score` is an unnormalized, query-specific relevance score. Higher scores
-indicate more relevant matches within that query's result set. Compare scores
-within the same query; values are not restricted to `0..1`.
-
-Fulltext queries return up to 1,000 matches by default. Pass a third
-argument such as `{limit: 5000}` to change the cap.
-
-Fulltext queries see changes made earlier in the current transaction.
-Opening a file-backed database for writing applies pending index updates
-and repairs missing or corrupt index data. If the shared index cannot serve
-the query's snapshot, Velr builds a temporary index for that search. This
-can happen when updates are pending, a concurrent writer has published a
-newer index, or a read-only connection opens an index that needs repair.
-The temporary build scans the indexed graph.
-
----
-
-## Query model
-
-A query may produce zero or more result tables.
-
-Velr exposes three main ways to run Cypher:
-
-- `run()` executes a query or script and drains all result tables.
-- `exec()` returns a stream of result tables.
-- `execOne()` expects exactly one result table.
-
-### `run()`
-
-Use `run()` when you only care about side effects:
-
-```ts
-using db = Velr.open(null);
-db.run("CREATE (:Movie {title:'Interstellar', released:2014})");
-```
-
-### `execOne()`
-
-Use `execOne()` when the query should yield exactly one table:
-
-```ts
-using db = Velr.open(null);
-db.run("CREATE (:Person {name:'Alice', age:30})");
-
-const table = db.execOne("MATCH (p:Person) RETURN p.name AS name, p.age AS age");
+const writer = Velr.open("graph.db");
 try {
-  console.log(table.columnNames());
-  console.log(table.toObjects({ int64: "number" }));
+  writer.run("MERGE (:Person {name: 'Alice'})");
 } finally {
-  table.close();
+  writer.close();
+}
+const reader = Velr.openReadonly("graph.db");
+try {
+  console.log(reader.query("MATCH (p:Person) RETURN p.name AS name"));
+} finally {
+  reader.close();
 }
 ```
 
-### `exec()`
+### Database creation options
 
-Use `exec()` when a query or script may produce multiple result tables:
+`Velr.create(path, options)` creates a new database and rejects an existing file;
+omit the path or pass `null` for an in-memory database. For a creation-time
+relationship property selection, pass zero or one case-sensitive, nonempty name
+without NUL characters:
 
-```ts
-using db = Velr.open(null);
+```js
+import { Velr } from "@velr-ai/velr";
 
-const stream = db.exec(
-  "MATCH (m:Movie {title:'The Matrix'}) RETURN m.title AS title; " +
-    "MATCH (m:Movie {title:'Inception'}) RETURN m.released AS released"
-);
-
+const configuredDb = Velr.create(null, { inlineEdgeProperties: ["weight"] });
 try {
-  for (const table of stream) {
-    console.log(table.columnNames());
-    console.log(table.toObjects({ int64: "number" }));
+  configuredDb.run("CREATE ()-[:LINK {weight:$weight}]->()", { params: { weight: 0.5 } });
+  console.log(configuredDb.inlineEdgeProperties()); // ['weight']
+} finally {
+  configuredDb.close();
+}
+```
+
+The selection applies across relationship types, persists when a file is reopened,
+and cannot be changed after creation. Read and write every value through ordinary Cypher.
+Omit the option to use the default empty selection. `VelrWorker.create()` provides
+the same options asynchronously.
+
+### Choosing an execution method
+
+The same query methods are available on connections and transactions:
+
+| Method | Use it for | Result ownership |
+|---|---|---|
+| `query()` | Collect exactly one table as objects | Automatically closes its table |
+| `run()` / `execute()` | Writes or scripts whose rows you do not need | Drains and closes results |
+| `execOne()` | Exactly one table with metadata and row access | Close the returned table |
+| `exec()` | Scripts that may produce multiple tables | Close the stream and its tables |
+
+### Parameters and owned values
+
+Bind `$name` separately through `params` keys without `$`. Parameters accept
+`null`, booleans, finite numbers, signed 64-bit `bigint` values, strings, nested
+arrays, and objects with string keys. Use `bigint` for integers outside
+JavaScript's safe integer range. For example, create several nodes from a list
+of records and select them with a bound filter:
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+const peopleDb = Velr.open();
+try {
+  peopleDb.run("UNWIND $people AS p CREATE (:Person {name:p.name, age:p.age})", {
+    params: { people: [{ name: "Alice", age: 42 }, { name: "Bob", age: 17 }] },
+  });
+  console.log(peopleDb.query(
+    "MATCH (p:Person) WHERE p.age >= $minAge RETURN p.name AS name, p.age AS age",
+    { params: { minAge: 18 } },
+  )); // [{ name: 'Alice', age: 42 }]
+} finally {
+  peopleDb.close();
+}
+```
+
+Result integers become `number` when safe and `bigint` otherwise. Choose
+`int64: "bigint"` or `"string"` for a uniform representation; `"number"` can
+lose precision. Text becomes a string and JSON cells are parsed by default.
+`JSON.parse` can lose precision for large JSON integers; `parseJson: false`
+keeps their raw text. Use unique result aliases: Cypher rejects duplicate result
+column names. `query()` collects all rows in memory.
+
+### Multiple result tables and rows
+
+Use `exec()` for scripts and `table.rows()` for incremental row processing.
+Each row contains `Cell` objects; `asJs()` converts a cell to a JavaScript value:
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+const streamDb = Velr.open();
+try {
+  const stream = streamDb.exec("RETURN 1 AS one; RETURN 2 AS two");
+  try {
+    for (const table of stream) {
+      try {
+        console.log(table.columnNames());
+        const rows = table.rows();
+        try {
+          for (const row of rows) console.log(row.map((cell) => cell.asJs()));
+        } finally {
+          rows.close();
+        }
+      } finally {
+        table.close();
+      }
+    }
+  } finally {
+    stream.close();
+  }
+} finally {
+  streamDb.close();
+}
+```
+
+Tables from `exec()` require their stream to remain open; `execOne()` tables
+belong directly to their connection or transaction. Closing a parent closes its
+remaining children. Keep parents open until results are finished; copied cells
+and collected JavaScript values remain usable afterward.
+
+### Row caps, deadlines, and cancellation
+
+`maxResultRows` limits each result table; `0` preserves columns without rows.
+Existing Cypher `LIMIT` clauses still apply. A row cap does not prevent writes
+or bound execution time. `timeoutMs` is a finite, non-negative deadline in
+milliseconds covering execution and subsequent table/row reads. Omit it for no
+deadline; `timeoutMs: 0` expires immediately:
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+const previewDb = Velr.open();
+try {
+  console.log(previewDb.query("UNWIND range(1, 100) AS n RETURN n", {
+    maxResultRows: 3,
+    timeoutMs: 2_000,
+  })); // [{ n: 1 }, { n: 2 }, { n: 3 }]
+} finally {
+  previewDb.close();
+}
+```
+
+Use the [worker API](#run-asynchronously-and-cancel-work) with an `AbortSignal`
+when work must be cancelled from the event loop. The direct API supports
+deadlines; it does not accept a query `AbortSignal`. See the
+[query control guide](GUIDE.md#query-cancellation-and-timeouts) for fetch-time
+errors and cancellation lifetime.
+
+## Transactions
+
+### Commit, rollback, and savepoints
+
+`transaction()` commits when its synchronous callback returns and rolls back
+when it throws, unless the callback has already ended the transaction. A
+savepoint lets you discard part of the work and keep the surrounding changes:
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+const txDb = Velr.open();
+try {
+  txDb.transaction((tx) => {
+    tx.run("CREATE (:Person {name:'Alice'})");
+    tx.withSavepoint((savepoint) => {
+      tx.run("CREATE (:Person {name:'Temporary'})");
+      savepoint.rollback();
+    });
+  });
+  console.log(txDb.query("MATCH (p:Person) RETURN p.name AS name")); // Alice only
+} finally {
+  txDb.close();
+}
+```
+
+For manual control, `beginTx()` returns a transaction with `commit()`,
+`rollback()`, and `close()`. Closing an uncommitted transaction rolls it back;
+commit/rollback consumes it and closes its results. Anonymous savepoints roll
+back and release on close.
+
+Only one transaction can be active on a connection. A writable transaction
+reserves the writer slot when it starts. For a read-only snapshot while another
+connection writes, open a separate read-only connection and begin its
+transaction there. Use the transaction handle for all work in that scope.
+
+Direct callbacks must be synchronous: do not pass an `async` function to
+`transaction()`, savepoint helpers, row visitors, or row mappers. Returned
+promises are not awaited. Worker counterparts await supported callbacks.
+Keep unrelated operations on the same worker serialized until an async
+transaction callback has finished, including across its `await` expressions.
+See the [transaction guide](GUIDE.md#transactions-and-savepoints) for details.
+
+### Named savepoints
+
+Named savepoints from `savepointNamed(name)` belong to the transaction and remain
+active when their JavaScript handle closes. Names must be unique while active.
+`rollbackTo(name)` keeps its target and discards newer named savepoints; release
+the newest with `releaseSavepoint(name)`. Commit releases surviving named
+savepoints:
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+const db = Velr.open();
+try {
+  db.transaction((tx) => {
+    tx.run("CREATE (:Person {name:'Alice'})");
+    tx.savepointNamed("beforeDraft").close();
+    tx.run("CREATE (:Person {name:'Draft'})");
+    tx.rollbackTo("beforeDraft");
+    tx.run("CREATE (:Person {name:'Grace'})");
+    tx.releaseSavepoint("beforeDraft");
+  });
+  console.log(db.query("MATCH (p:Person) RETURN p.name AS name ORDER BY name"));
+  // [{ name: 'Alice' }, { name: 'Grace' }]
+} finally {
+  db.close();
+}
+```
+
+## Errors and concurrency
+
+### Handle execution and fetch errors
+
+Direct database/query failures throw `VelrError`; inspect `message`, `code`, and
+`stopReason`. Driver-side argument/conversion failures use `VelrTypeError`;
+closed or consumed direct handles use `VelrStateError`. Worker operations reject
+promises. A worker child invalidated by closing its parent can reject with an
+ordinary `Error`, and its `closed` flag may remain false. That flag records
+closure of the individual handle; keep parents open until their children are
+finished. Queries can fail when execution
+starts, a stream advances, or rows are read. Put the complete operation in your
+error-handling scope and close results on success, error, or early exit:
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+import { VelrError } from "@velr-ai/velr";
+
+const errorDb = Velr.open();
+try {
+  console.log(errorDb.query("RETURN missing"));
+} catch (error) {
+  if (error instanceof VelrError) console.error(error.message);
+  else throw error;
+} finally {
+  errorDb.close();
+}
+```
+
+### Run asynchronously and cancel work
+
+The direct API is synchronous and runs on the calling Node.js thread. Use each
+connection and its handles on one thread. `VelrWorker` keeps database work off
+the event loop; its methods return promises and streams/rows support `for await`.
+Pass an `AbortSignal` to cancel execution and subsequent result reads:
+
+```js
+import { VelrWorker } from "@velr-ai/velr/worker";
+
+const workerDb = await VelrWorker.open();
+const controller = new AbortController();
+const timer = setTimeout(() => controller.abort(), 25);
+try {
+  const rows = await workerDb.query(
+    "UNWIND range(1, 1000000) AS n RETURN sum(n) AS total",
+    { signal: controller.signal, timeoutMs: 2_000 },
+  );
+  console.log(rows);
+} catch (error) {
+  const reason = error && typeof error === "object" && "stopReason" in error
+    ? error.stopReason : undefined;
+  if (reason === "cancelled" || reason === "deadline_exceeded") console.log(reason);
+  else throw error;
+} finally {
+  clearTimeout(timer);
+  await workerDb.close();
+}
+```
+
+A stop reports `"cancelled"` or `"deadline_exceeded"`; fast queries can complete
+before a stop request. Keep cancellation controls available until fetching
+finishes. If interruption ends an explicit transaction, start a new one.
+
+## Features and integrations
+
+### SEARCH clause
+
+Use `MATCH` or `OPTIONAL MATCH` with `SEARCH` to retrieve fulltext or vector
+matches through the normal query methods. Search indexes require a file-backed
+database and a mandatory `LIMIT` inside the search parentheses. Bind query values
+and limits with parameters. `SCORE AS score` exposes each match's score;
+`ORDER BY score DESC` orders the returned rows explicitly.
+
+`LIMIT` accepts integers from `0` through `2147483647`; fulltext `SKIP`/`OFFSET`
+accepts integers from `0` through `9223372036854775807`. Pagination expressions
+can use constants and parameters, but cannot depend on query variables. Query
+values can refer to variables from earlier clauses, including correlated
+`EXISTS { ... }` and `COUNT { ... }` subqueries.
+
+Vector index names must be identifiers; use backticks for names containing
+spaces. Fulltext index names also accept string parameters. Search patterns
+contain one node or one relationship hop, with only the searched element named
+or constrained. For relationship indexes, use `MATCH ()-[r]->()` with `SEARCH r`.
+Null queries and zero limits produce no matches; `OPTIONAL MATCH` preserves the
+input row with null entity and score values. Use a fresh name for `SCORE AS`.
+The [search guide](GUIDE.md#search-clause) gives complete filtering, pagination,
+analyzer, relationship, and correlated-subquery examples.
+
+### Fulltext search
+
+Define an index with Cypher DDL, then search it. This example seeds a paper,
+binds the index and query, and selects the first page:
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+const searchDb = Velr.open("search.db");
+try {
+  searchDb.run("MERGE (p:Paper {id:'paper-1'}) SET p.title=$title, p.abstract=$abstract", {
+    params: { title: "Graph databases", abstract: "Connected data and vector search" },
+  });
+  searchDb.run(`CREATE FULLTEXT INDEX paperText IF NOT EXISTS
+    FOR (n:Paper) ON EACH [n.title, n.abstract]`);
+  console.log(searchDb.query(`
+    MATCH (node:Paper)
+    SEARCH node IN (FULLTEXT INDEX $index FOR $text
+      WITH ANALYZER 'standard' OFFSET $offset LIMIT $limit)
+    SCORE AS score RETURN node.title AS title, score ORDER BY score DESC
+  `, { params: { index: "paperText", text: "title:graph", offset: 0, limit: 10 } }));
+} finally {
+  searchDb.close();
+}
+```
+
+Search text supports terms, phrases, field scopes, boolean grouping, prefixes,
+and boosts. Scores rank matches within a query and are not normalized or
+comparable across queries. Writes update indexes automatically.
+`WITH ANALYZER` selects `standard` (default), `keyword`, `whitespace`, `simple`,
+or `english`; `standard-no-stop-words` and `default` are aliases for `standard`.
+An enclosing `WHERE` filters the selected page; fulltext has no inner `WHERE`.
+
+### Vector search and embeddings
+
+Store precomputed embeddings as numeric vector/list properties and index them:
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+const vectorDb = Velr.open("vectors.db");
+try {
+  vectorDb.run("MERGE (n:Chunk {id:'chunk-1'}) SET n.text=$text, n.embedding=$embedding, n.category=$category", {
+    params: { text: "Connected data", embedding: [0.12, 0.34, 0.56], category: "guide" },
+  });
+  vectorDb.run(`CREATE VECTOR INDEX chunkEmbedding IF NOT EXISTS
+    FOR (n:Chunk) ON (n.embedding) WITH [n.category]
+    OPTIONS {indexConfig: {dimensions: 3, metric: 'cosine'}}`);
+  console.log(vectorDb.query(`
+    MATCH (node:Chunk)
+    SEARCH node IN (VECTOR INDEX chunkEmbedding FOR $embedding
+      WHERE node.category = $category LIMIT $limit)
+    SCORE AS score RETURN node.text AS text, score ORDER BY score DESC
+  `, { params: { embedding: [0.10, 0.30, 0.50], category: "guide", limit: 10 } }));
+} finally {
+  vectorDb.close();
+}
+```
+
+Vectors must match the configured dimensions; cosine query vectors must be
+nonzero. Cosine `SEARCH` scores use `(1 + cosine) / 2`; Euclidean scores use
+`1 / (1 + squaredDistance)`. Both range from 0 to 1, with higher scores better.
+Dot-product indexes use unbounded dot scores. For exact scoring without an
+index, use `vector.similarity.cosine(left, right)` in Cypher.
+
+Declare filter properties with index DDL `WITH [...]`. An inner `WHERE` filters
+before nearest-neighbor selection; an enclosing `WHERE`, before or after
+`SEARCH`, filters the selected matches and can return fewer than the limit.
+Inner filters support property comparisons, `IN`, boolean and null tests joined
+by `AND`. Each property permits one lower and one upper bound, or one equality,
+`IN`, or null test. Use the enclosing `WHERE` for other predicates. Vector search
+does not accept inner `SKIP`, `OFFSET`, or `WITH ANALYZER`.
+
+For text embeddings, `registerVectorEmbedder(name, callback)` supplies one finite
+vector per input, in order and with the requested dimensions. Reference the name
+with `embedder: 'name'` in an `ON EACH [...]` vector index. Direct callbacks are
+synchronous; worker callbacks can be async but run on the caller's thread. Do
+not call the same connection/worker from its embedder. Register the callback on
+each connection whose operations need embeddings, including after reopening a
+file. If a transaction has pending changes to an embedder-backed index, commit
+or roll back before searching that index. The
+[vector guide](GUIDE.md#vector-search-and-embeddings) demonstrates registration,
+text queries, callback inputs, and index options.
+
+### Compatible procedure calls
+
+Existing fulltext and vector procedures remain supported, including
+`queryRelationships` for relationship indexes. These standalone examples use
+the procedure forms with bound query values:
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+const db = Velr.open("fulltext-procedure.db");
+try {
+  db.run("MERGE (:Paper {title:'Graph databases'})");
+  db.run("CREATE FULLTEXT INDEX paperText IF NOT EXISTS FOR (p:Paper) ON EACH [p.title]");
+  console.log(db.query(
+    "CALL db.index.fulltext.queryNodes('paperText', $text, {limit: 10}) " +
+      "YIELD node, score RETURN node.title AS title, score ORDER BY score DESC",
+    { params: { text: "graph" } },
+  ));
+} finally {
+  db.close();
+}
+```
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+const db = Velr.open("vector-procedure.db");
+try {
+  db.run("MERGE (:Chunk {text:'Connected data', embedding:[1.0,0.0]})");
+  db.run(`CREATE VECTOR INDEX chunkEmbedding IF NOT EXISTS
+    FOR (n:Chunk) ON (n.embedding) OPTIONS {indexConfig:{dimensions:2, metric:'cosine'}}`);
+  console.log(db.query(
+    "CALL db.index.vector.queryNodes('chunkEmbedding', 10, $embedding) " +
+      "YIELD node, score RETURN node.text AS text, score ORDER BY score DESC",
+    { params: { embedding: [1.0, 0.0] } },
+  ));
+} finally {
+  db.close();
+}
+```
+
+Fulltext procedure scores use the same scale as `SEARCH`; without an explicit
+options limit they return at most 1,000 matches. Vector procedures retain raw
+cosine or negative squared Euclidean scores, so their scores differ from
+`SEARCH`. Registered embedders also accept text queries through vector procedures.
+
+### Arrow import and export
+
+`toArrowIpc()` exports owned IPC file/Feather v2 bytes without an Arrow JavaScript
+dependency. Bind those bytes with `bindArrowIpc()` and read them using `BIND()`:
+
+```js
+import { Velr } from "@velr-ai/velr";
+
+const arrowDb = Velr.open();
+try {
+  const table = arrowDb.execOne("RETURN 'Alice' AS name, 42 AS age");
+  try {
+    const ipc = table.toArrowIpc();
+    arrowDb.bindArrowIpc("_people", ipc);
+    console.log(arrowDb.query(`
+      UNWIND BIND('_people') AS row RETURN row.name AS name, row.age AS age
+    `));
+    // Requires the optional apache-arrow package installed above:
+    const arrowTable = await table.toArrowTable();
+    console.log(arrowTable.numRows, arrowTable.numCols); // 1 2
+  } finally {
     table.close();
   }
 } finally {
-  stream.close();
+  arrowDb.close();
 }
 ```
 
----
+IPC streams are unsupported. Input buffers are borrowed only during binding;
+exported buffers and converted Arrow tables outlive result handles. Keep the
+source table open until `toArrowTable()` resolves. Exports can materialize the
+whole result. Types are inferred per result: numeric columns can be integers or
+floats, incompatible mixed kinds become strings, and lists/maps/graph values are
+JSON UTF-8 strings rather than nested Arrow arrays. Nulls stay null;
+empty/all-null columns are UTF-8. Inspect the exported schema before choosing
+data types.
 
-## Bounded result previews
+### Graph introspection and explain
 
-Pass `maxResultRows` when a host needs projected column names and a small row
-sample without rewriting the Cypher text:
+```js
+import { Velr } from "@velr-ai/velr";
 
-```ts
-using db = Velr.openReadonly("mygraph.db");
-
-const table = db.execOne(
-  "MATCH (n) RETURN labels(n) AS labels, n.name AS name ORDER BY name",
-  { maxResultRows: 20 }
-);
-
+const inspectionDb = Velr.open("inspection.db");
 try {
-  const columns = table.columnNames();
-  const sample = table.toObjects();
-  console.log(columns);
-  console.log(sample);
-} finally {
-  table.close();
-}
-```
-
-`maxResultRows: 0` preserves column metadata and makes row cursors return no
-rows. The cap is enforced by Velr during result emission, not by appending or
-injecting Cypher `LIMIT`, and applies independently to each result table
-produced by `exec()`. Existing Cypher `LIMIT` clauses still apply. It is not a
-timeout or cancellation mechanism; keep read-only validation and execution
-deadlines as separate host concerns.
-
----
-
-## Query parameter binding
-
-Pass `params` to bind openCypher parameters out of band. Query text uses
-`$name`; parameter names in JavaScript and TypeScript omit the leading `$`.
-Values are passed as Cypher values, not interpolated into query text, so a
-JavaScript `string` is always a Cypher string value.
-
-```ts
-using db = Velr.open(null);
-
-db.run("CREATE (:Person {name: $name, age: $age})", {
-  params: { name: "Alice", age: 42 }
-});
-
-const rows = db.query(
-  "MATCH (p:Person) WHERE p.age >= $minAge RETURN p.name AS name ORDER BY name",
-  {
-    maxResultRows: 20,
-    params: { minAge: 18 }
-  }
-);
-
-console.log(rows);
-```
-
-Supported parameter values are `null`, booleans, signed 64-bit integers,
-finite numbers, strings, arrays, and objects with string keys. Use `bigint`
-when an integer is outside the safe JavaScript integer range.
-
----
-
-## Table lifetime and ownership
-
-Table lifetime depends on how a table was obtained.
-
-### Tables from `exec()`
-
-Tables pulled from `exec()` are **stream-scoped**.
-
-They remain valid while the producing stream remains open, and closing the
-stream closes any still-open tables produced by that stream.
-
-```ts
-const stream = db.exec("MATCH (n) RETURN n");
-const table = stream.nextTable();
-// table is valid here while stream remains open
-stream.close();
-```
-
-### Tables from `execOne()`
-
-Tables returned by `execOne()` are **parent-scoped**, not stream-scoped.
-
-- `Velr.execOne()` returns a table parented to the connection.
-- `VelrTx.execOne()` returns a table parented to the transaction.
-
-The returned table remains usable until it or its parent connection or
-transaction is closed.
-
-Even so, tables should still be closed when no longer needed, ideally with
-`try` / `finally` or TypeScript `using`.
-
----
-
-## Rows and cells
-
-Rows are exposed through `Rows`. Each yielded row is an array of `Cell` objects.
-
-`Cell.asJs()` converts values to normal JavaScript values:
-
-- `NULL` to `null`
-- `BOOL` to `boolean`
-- `INT64` to `number` when safe, or `bigint` when outside the safe range
-- `DOUBLE` to `number`
-- `TEXT` to `string` by default
-- `JSON` to parsed JavaScript values by default
-
-Example:
-
-```ts
-const table = db.execOne("MATCH (p:Person) RETURN p.name AS name, p.age AS age");
-try {
-  const rows = table.rows();
+  inspectionDb.run("MERGE (:Paper {title: 'Graph databases'})");
+  inspectionDb.run("CREATE FULLTEXT INDEX paperText IF NOT EXISTS FOR (p:Paper) ON EACH [p.title]");
+  console.log(inspectionDb.query(`SHOW INDEXES
+    YIELD name, type, entityType, properties
+    RETURN name, type, entityType, properties ORDER BY name`));
+  console.log(inspectionDb.query("CALL db.labels() YIELD label RETURN label ORDER BY label"));
+  console.log(inspectionDb.query(`SHOW CURRENT GRAPH SHAPE
+    YIELD element_kind, element_name, property_name, observed_type
+    RETURN element_kind, element_name, property_name, observed_type`));
+  const trace = inspectionDb.explain("MATCH (p:Paper) RETURN count(p) AS papers");
   try {
-    for (const row of rows) {
-      console.log(row[0]?.asJs(), row[1]?.asJs({ int64: "number" }));
-    }
+    console.log(trace.toCompactString());
   } finally {
-    rows.close();
+    trace.close();
   }
 } finally {
-  table.close();
+  inspectionDb.close();
 }
 ```
 
-For convenience, `table.toObjects()` maps rows to JavaScript objects keyed by
-column name.
+Graph shape describes stored data rather than declaring a schema. `explain()`
+does not execute the query; `explainAnalyze()` executes it, including writes.
+Use `trace.snapshot()` for an owned structured result; copied snapshots and
+strings remain usable after closure. Explain methods accept query text without
+parameter bindings or query options. See the [explain guide](GUIDE.md#explain-plans).
+`SHOW INDEXES` lists range, fulltext, and vector indexes. `db.labels()`,
+`db.relationshipTypes()`, and `db.propertyKeys()` list the graph's labels,
+relationship types, and property names.
 
----
+## Compatibility and maintenance
 
-## Transactions and savepoints
+Opening a database never migrates it automatically. New databases use schema
+version 11. Databases at schema versions 3 through 9 require explicit migration
+on a writable connection before graph queries or transactions can run. After
+migration, reopen any read-only connections. Databases created before Velr
+0.2.14 must be recreated by importing the source data.
 
-Use `beginTx()` to open a transaction:
+```js
+import { Velr } from "@velr-ai/velr";
 
-```ts
-using db = Velr.open(null);
-
-const tx = db.beginTx();
+const maintenanceDb = Velr.open("maintenance.db");
 try {
-  tx.run("CREATE (:Movie {title:'Interstellar', released:2014})");
-  tx.commit();
-} catch (err) {
-  if (!tx.closed) tx.rollback();
-  throw err;
-}
-```
-
-For callback-style transactional code, use `transaction()`:
-
-```ts
-using db = Velr.open(null);
-
-db.transaction((tx) => {
-  tx.run("CREATE (:Movie {title:'Interstellar', released:2014})");
-});
-```
-
-If a transaction is closed without `commit()`, it is rolled back.
-
-After `commit()` or `rollback()`, a transaction can no longer be used.
-
-### Savepoints
-
-Velr supports two savepoint styles:
-
-- `savepoint()` creates a scoped, handle-owned savepoint.
-- `savepointNamed(name)` creates a transaction-owned named savepoint.
-
-Scoped savepoints are owned by the JavaScript handle:
-
-- closing the handle closes the savepoint
-- `release()` releases it
-- `rollback()` rolls back to it and releases it
-
-Named savepoints are owned by the transaction:
-
-- closing the returned JavaScript handle does not remove the named savepoint
-- `rollbackTo(name)` rolls back to that named savepoint, discards any newer
-  named savepoints, and keeps the target named savepoint active
-- `releaseSavepoint(name)` releases a named savepoint by name; the named
-  savepoint must be the most recent active named savepoint
-- `release()` or `rollback()` on a named savepoint handle consumes that named
-  savepoint
-
-Active named savepoints are released automatically during `commit()` so that
-surviving changes are preserved in the committed transaction.
-
-Use `withSavepoint()` or `withSavepointNamed(name)` when you want Python-style
-scope behavior in JavaScript: the savepoint is released when the callback
-returns and rolled back when the callback throws.
-
-```ts
-using db = Velr.open(null);
-
-const tx = db.beginTx();
-tx.run("CREATE (:Temp {k:'outer'})");
-
-tx.savepointNamed("sp1");
-tx.run("CREATE (:Temp {k:'a'})");
-
-tx.savepointNamed("sp2");
-tx.run("CREATE (:Temp {k:'b'})");
-
-tx.rollbackTo("sp1"); // undoes a and b, drops sp2, keeps sp1 active
-tx.run("CREATE (:Temp {k:'c'})");
-
-tx.releaseSavepoint("sp1");
-tx.commit();
-```
-
----
-
-## JavaScript / TypeScript / Apache Arrow interop
-
-Velr can export result tables as Arrow IPC and convert them into an
-`apache-arrow` table when the optional package is installed:
-
-```ts
-using db = Velr.open(null);
-db.run(MOVIES_CREATE);
-
-const table = db.execOne(
-  "MATCH (m:Movie) RETURN m.title AS title, m.released AS released ORDER BY released"
-);
-
-try {
-  const ipc = table.toArrowIpc();
-  const arrowTable = await table.toArrowTable();
-  console.log(ipc.byteLength, arrowTable);
-} finally {
-  table.close();
-}
-```
-
-Velr can also bind external Arrow IPC file / Feather v2 bytes under a logical
-name and query them from Cypher:
-
-```ts
-db.bindArrowIpc("_people", ipc);
-
-const rows = db.query(`
-  UNWIND BIND('_people') AS row
-  RETURN row.name AS name
-`);
-```
-
-The IPC buffer is borrowed only for the duration of the call.
-
----
-
-## Vector indexes
-
-Velr supports two vector index shapes.
-
-If your application already computes embeddings, store them as a vector/list
-property and index that property. No embedder is needed, and queries pass a
-numeric vector/list:
-
-```ts
-using db = Velr.open("graph.db");
-
-db.run(`
-  CREATE (:Chunk {
-    id: 'chunk-1',
-    text: 'Graph databases store connected data',
-    embedding: [0.12, 0.34, 0.56]
-  })
-`);
-
-db.run(`
-  CREATE VECTOR INDEX chunkEmbedding IF NOT EXISTS
-  FOR (n:Chunk)
-  ON (n.embedding)
-  OPTIONS { indexConfig: { dimensions: 3, metric: 'cosine' } }
-`);
-
-const rows = db.query(`
-  CALL db.index.vector.queryNodes('chunkEmbedding', 10, [0.10, 0.30, 0.50])
-  YIELD node, score
-  RETURN node, score
-`);
-```
-
-For exact query-time scoring without a native vector index, use the
-Neo4j-compatible scalar function `vector.similarity.cosine(left, right)` inside
-`WITH`, `WHERE`, `RETURN`, and `ORDER BY`.
-
-For text-to-vector search, register an embedding callback and reference it from
-`CREATE VECTOR INDEX`.
-
-`OPTIONS { indexConfig: ... }` configures Velr vector indexes. Prefer the
-Neo4j-style names where they exist; shorter aliases are accepted for existing
-queries and examples.
-
-```cypher
-OPTIONS {
-  indexConfig: {
-    `vector.dimensions`: 384,
-    `vector.similarity_function`: 'cosine',
-    embedder: 'text',
-    cache_policy: 'required',
-    `vector.hnsw.ef_search`: 128
+  if (maintenanceDb.needsMigration()) {
+    const report = maintenanceDb.migrate();
+    console.log(report.status, report.fromVersion, report.toVersion);
   }
-}
-```
-
-Core options:
-
-| Option | Accepted aliases | Meaning |
-|---|---|---|
-| `` `vector.dimensions` `` | `dimensions` | Required vector width. Every stored vector, embedder output, and query vector must contain exactly this many values. |
-| `` `vector.similarity_function` `` | `metric`, `similarity_function` | Distance function. Use `cosine` for most semantic embeddings, `l2`/`euclidean` for geometric distance, and `dot`/`inner_product`/`max_inner_product` for inner-product retrieval. Default: `cosine`. |
-| `embedder` | `velr.embedder` | Name of a registered callback for `ON EACH [...]` indexes. Omit it for stored-vector indexes such as `ON (n.embedding)`. |
-| `embedder_fingerprint` | `embedderFingerprint`, `velr.embedder_fingerprint` | Optional model/version metadata stored with the index definition. Velr does not use it to call the embedder. |
-| `cache_policy` | `cachePolicy` | Embedder-backed indexes only. `required` stores generated embeddings in the database so index files can be rebuilt without recomputing them; `best_effort` skips cache write errors; `none` stores no generated embedding cache. Defaults: `required` with `embedder`, `none` without. Stored-vector indexes require `none` because the vector property is already the durable source. |
-
-HNSW tuning options:
-
-| Option | Integer count | Meaning |
-|---|---:|---|
-| `` `vector.hnsw.m` `` | `1..512` neighbors | Maximum graph connectivity per vector. For example, `16` means each vector keeps roughly 16 HNSW neighbor links. Higher values can improve recall on difficult datasets, with more memory, larger index files, and slower builds. |
-| `` `vector.hnsw.ef_construction` `` | `1..3200` candidates | Build-time candidate pool per inserted vector. For example, `320` means the builder considers a working set of 320 candidate neighbors while placing each vector. Higher values can improve index quality and recall, usually with slower index creation. |
-| `` `vector.hnsw.ef_search` `` | `1..3200` candidates | Query-time candidate pool. For example, `128` means each search keeps a working set of 128 candidate vectors while traversing the HNSW graph. Higher values can improve recall, usually with slower searches. Velr's default is `64`. |
-
-```ts
-import { Velr, type VectorEmbedder } from "@velr-ai/velr";
-
-const toyEmbedder: VectorEmbedder = (inputs) =>
-  inputs.map((input) => {
-    const text = input.fields.map((field) => String(field.value ?? "")).join("\n");
-    return toyVector(text, input.dimensions);
-  });
-
-using db = Velr.open("graph.db");
-db.registerVectorEmbedder("toy", toyEmbedder);
-
-db.run(`
-  CREATE VECTOR INDEX paperEmbedding IF NOT EXISTS
-  FOR (n:Paper)
-  ON EACH [n.title, n.abstract]
-  OPTIONS {
-    indexConfig: {
-      dimensions: 3,
-      metric: 'cosine',
-      embedder: 'toy'
-    }
-  }
-`);
-```
-
-`ON EACH [n.title, n.abstract]` passes both property values to the callback in
-that order. Query text is passed as one unnamed string field. Vector `score` is
-metric-dependent and non-normalized; higher scores are better within a single
-query result set.
-
-For file-backed databases, Velr can repair missing or corrupt vector index data
-from stored vector properties or from registered embedders, depending on how
-the index was created.
-
-Embedding callbacks run while Velr is maintaining the index or evaluating the
-query. For heavier embedding work, use `VelrWorker` so database work runs off
-the main thread.
-
----
-
-## Worker threads
-
-The core API is synchronous. Use `@velr-ai/velr/worker` to keep synchronous database work
-off the main thread. The worker API mirrors the main driver, but methods that
-touch the database are async and handle iteration uses `for await`.
-
-```ts
-import { VelrWorker } from "@velr-ai/velr/worker";
-
-const db = await VelrWorker.open("graph.db");
-try {
-  await db.run("CREATE (:Job {name:'background'})");
-  const rows = await db.query("MATCH (j:Job) RETURN j.name AS name");
-  console.log(rows);
+  maintenanceDb.run("MERGE (:Expired {id:'old'})");
+  maintenanceDb.run("MATCH (n:Expired) DETACH DELETE n");
+  maintenanceDb.vacuum();
+  console.log(maintenanceDb.query("MATCH (n:Expired) RETURN count(n) AS remaining"));
 } finally {
-  await db.close();
+  maintenanceDb.close();
 }
 ```
 
-The same shape is available for transactions, result tables, streams, rows, and
-explain traces:
+Migration and vacuum require a writable connection outside an active
+transaction; vacuum also requires the current schema. Their Cypher equivalents
+are `MIGRATE DATABASE` and `VACUUM DATABASE`. Migrate supported older databases
+before inspecting their graph shape.
 
-```ts
-await db.transaction(async (tx) => {
-  await tx.run("CREATE (:Job {name: $name})", { params: { name: "queued" } });
-});
+Normally npm supplies the runtime. For a custom compatible library, set
+`VELR_NATIVE_LIBRARY` to its absolute path before the first connection opens
+(`VELR_LIB` is an alias). See the [deployment guide](GUIDE.md#deployment-configuration)
+for additional configuration.
 
-const stream = await db.exec("RETURN 1 AS one; RETURN 2 AS two");
-try {
-  for await (const table of stream) {
-    console.log(await table.columnNames(), await table.toObjects());
-    await table.close();
-  }
-} finally {
-  await stream.close();
-}
-```
+## Reference and support
 
-`registerVectorEmbedder()` also works on `VelrWorker`. The function remains in
-the owner thread, while the worker registers a native callback that bridges
-embedding requests over shared memory and waits synchronously for the result.
-The embedder may return vectors directly or return a promise.
-
-Do not call back into the same `VelrWorker` from inside a worker embedder; the
-database worker is paused waiting for that embedder response.
-
----
-
-## Explain support
-
-Velr exposes explain traces through:
-
-- `Velr.explain()`
-- `Velr.explainAnalyze()`
-- `VelrTx.explain()`
-- `VelrTx.explainAnalyze()`
-
-These return an `ExplainTrace`, which can be navigated incrementally, fully
-materialized with `snapshot()`, or rendered with `toCompactString()` when the
-loaded runtime exposes compact rendering.
-
-```ts
-using db = Velr.open(null);
-
-const trace = db.explain("MATCH (n) RETURN n");
-try {
-  console.log(trace.snapshot());
-} finally {
-  trace.close();
-}
-```
-
----
-
-## Regular expression matching
-
-Use the openCypher operator `=~` to match an entire string against a regular
-expression. Matching is case-sensitive by default. Use `(?i)` for
-case-insensitive matching.
-
-```cypher
-RETURN 'alice' =~ '(?i)A.*' AS matched
-```
-
-This returns `true`.
-
-The pattern string uses the Rust regex dialect. Lookaround and backreferences
-are unsupported. A null or non-string operand yields `null`. An invalid
-pattern raises a query error when both operands are strings.
-See [supported pattern syntax](https://docs.rs/regex/latest/regex/#syntax).
-
----
-
-## Errors
-
-Query and database failures throw `VelrError`, with diagnostic text in `message`
-and an optional numeric operation status in `code`. For Cypher errors, the
-diagnostic identifies the query category and compile-time or runtime phase.
-Categories include
-`SyntaxError`, `TypeError`, `ArgumentError`, `EntityNotFound`,
-`ConstraintVerificationFailed`, `SemanticError`, `ParameterMissing`,
-`ProcedureNotFound`, and `ArithmeticError`.
-
-`VelrStateError` extends `VelrError` for closed or consumed handles.
-`VelrTypeError` extends JavaScript `TypeError` for invalid JavaScript arguments
-and incompatible value conversions.
-
-Handle errors around both query execution and result consumption. `nextTable()`,
-row iteration, and collection can throw after a stream or table is returned.
-Worker API operations reject their promises with the corresponding errors.
-
-```ts
-import { Velr, VelrError } from "@velr-ai/velr";
-
-using db = Velr.open(null);
-try {
-  console.log(db.query("RETURN missing"));
-} catch (error) {
-  if (error instanceof VelrError) {
-    console.error(error.message);
-  } else {
-    throw error;
-  }
-}
-```
-
----
-
-## OpenCypher functions
-
-The following openCypher functions and constructors are available:
-
-**Graph and path**
-
-- `id()`
-- `type()`
-- `labels()`
-- `keys()`
-- `properties()`
-- `length()`
-- `nodes()`
-- `relationships()`
-
-**Lists and predicates**
-
-- `size()`
-- `head()`
-- `last()`
-- `tail()`
-- `reverse()`
-- `range()`
-- `all()`
-- `any()`
-- `none()`
-- `single()`
-
-**Strings and conversion**
-
-- `coalesce()`
-- `toInteger()`
-- `toString()`
-- `toLower()`
-- `trim()`
-- `substring()`
-- `split()`
-
-**Numeric**
-
-- `abs()`
-- `ceil()`
-- `rand()`
-- `sign()`
-- `sqrt()`
-
-**Temporal**
-
-- `date()`
-- `time()`
-- `localtime()`
-- `datetime()`
-- `localdatetime()`
-- `duration()`
-- `datetime.fromepoch()`
-- `datetime.fromepochmillis()`
-- `date.realtime()`, `date.transaction()`, `date.statement()`
-- `time.realtime()`, `time.transaction()`, `time.statement()`
-- `localtime.realtime()`, `localtime.transaction()`, `localtime.statement()`
-- `datetime.realtime()`, `datetime.transaction()`, `datetime.statement()`
-- `localdatetime.realtime()`, `localdatetime.transaction()`,
-  `localdatetime.statement()`
-
-**Aggregates**
-
-- `count()`
-- `sum()`
-- `avg()`
-- `min()`
-- `max()`
-- `collect()`
-- `percentileDisc()`
-- `percentileCont()`
-
----
-
-## Thread safety
-
-The direct `Velr` driver is synchronous and intended to be used from one Node.js
-thread at a time.
-
-Use `VelrWorker` from `@velr-ai/velr/worker` when you want database work to run on a
-worker thread and expose an async API to the main thread.
-
----
-
-## Platform support
-
-This package installs or resolves a bundled native runtime for the current
-platform so user installation stays:
-
-```bash
-npm install @velr-ai/velr
-```
-
-Bundled platforms:
-
-- macOS arm64 (Apple Silicon)
-- macOS x86_64 (Intel)
-- Linux x86_64
-- Linux aarch64
-- Windows x86_64
-
----
+- [Public API reference](API.md): all types, methods, options, errors, and lifetime contracts;
+  the published TypeScript declarations also provide editor documentation.
+- [Query language reference](QUERY_LANGUAGE.md): syntax, functions, search grammar, and restrictions.
+- [Extended driver guide](GUIDE.md): additional examples and tuning options.
+- [JavaScript examples](https://github.com/velr-ai/velr-javascript-examples) and
+  [TypeScript examples](https://github.com/velr-ai/velr-typescript-examples).
+- [Community questions](https://github.com/velr-ai/velr/discussions) and
+  [bug reports or feature requests](https://github.com/velr-ai/velr/issues).
 
 ## License
 
-This package is licensed under the MIT License. See [`LICENSE`](LICENSE).
-
-The bundled native runtime may be used and freely redistributed in unmodified
-form under the terms of [`LICENSE.runtime`](LICENSE.runtime).
+The binding source is [MIT licensed](LICENSE). The bundled native runtime is
+licensed separately under [LICENSE.runtime](LICENSE.runtime), which permits use
+and redistribution of unmodified binaries under its terms.

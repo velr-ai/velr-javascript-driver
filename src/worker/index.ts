@@ -10,6 +10,7 @@ import { Worker } from "node:worker_threads";
 
 import { Cell } from "../driver.js";
 import { VelrError, VelrStateError, VelrTypeError } from "../errors.js";
+import { createQueryControl } from "../query-control.js";
 import type {
   CellAsJsOptions,
   CellType,
@@ -29,6 +30,16 @@ import type {
 export interface VelrWorkerOptions {
   /** Additional worker data passed to Node's `Worker` constructor. */
   readonly workerData?: unknown;
+}
+
+/** Query options for a worker connection or transaction. */
+export interface WorkerQueryOptions extends QueryOptions {
+  /**
+   * Signal for cancelling execution and subsequent table and row reads.
+   * An aborted query rejects with a `VelrError` whose `stopReason` is
+   * `"cancelled"`. You can pass a signal together with `timeoutMs`.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -136,6 +147,7 @@ class WorkerRpc {
   readonly worker: Worker;
   onEmbedRequest?: (request: WorkerEmbedRequest) => void;
   #pending = new Map<string, PendingCall>();
+  #queryControls = new Map<string, { parent?: string; release: () => void }>();
   #closed = false;
   #nextId = 0;
 
@@ -145,9 +157,9 @@ class WorkerRpc {
     worker.on("error", (err) => this.#rejectAll(err));
     worker.on("exit", (code) => {
       this.#closed = true;
-      if (code !== 0) {
-        this.#rejectAll(new Error(`Velr worker exited with code ${code}`));
-      }
+      this.#rejectAll(new Error(`Velr worker exited with code ${code}`));
+      for (const entry of this.#queryControls.values()) entry.release();
+      this.#queryControls.clear();
     });
   }
 
@@ -169,9 +181,53 @@ class WorkerRpc {
     });
   }
 
+  async query<T>(
+    op: string,
+    cypher: string,
+    options: (WorkerQueryOptions & CellAsJsOptions) | undefined,
+    hasResultHandle = false,
+    parent?: string
+  ): Promise<T> {
+    const { signal, ...queryOptions } = options ?? {};
+    const payload = { cypher, options: queryOptions, handle: parent };
+    if (signal === undefined && queryOptions.timeoutMs === undefined) {
+      return this.call<T>(op, payload);
+    }
+    if (signal !== undefined && !(signal instanceof AbortSignal)) {
+      throw new VelrTypeError("signal must be an AbortSignal");
+    }
+    const control = createQueryControl(queryOptions.timeoutMs);
+    const abort = () => control.cancel();
+    const release = () => {
+      signal?.removeEventListener("abort", abort);
+      control.free();
+    };
+    let retained = false;
+    try {
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+      const result = await this.call<T>(op, { ...payload, queryControl: control.ref() });
+      if (hasResultHandle && !this.#closed) {
+        const ref = result as WorkerHandleRef;
+        this.#queryControls.set(ref.id, { parent, release });
+        retained = true;
+      }
+      return result;
+    } finally {
+      if (!retained) release();
+    }
+  }
+
+  releaseQueryControls(handleId: string): void {
+    for (const [id, entry] of this.#queryControls) {
+      if (id !== handleId && entry.parent !== handleId) continue;
+      this.#queryControls.delete(id);
+      entry.release();
+    }
+  }
+
   async terminate(): Promise<void> {
     this.#closed = true;
-    this.#rejectAll(new VelrStateError("Velr worker is closed"));
     await this.worker.terminate();
   }
 
@@ -215,7 +271,15 @@ abstract class WorkerHandle {
     protected readonly ref: WorkerHandleRef
   ) {}
 
-  /** Whether this worker-side handle has been closed. */
+  /**
+   * Whether this local handle has been marked closed by its own `close()` or
+   * finalization call, such as transaction commit or savepoint release. The flag
+   * is set before that call's worker request finishes, including when it rejects.
+   * Parent closure or consumption through another handle does not update this
+   * flag, so `false` does not establish worker-side validity. Requests against
+   * invalidated handles may reject with an ordinary `Error`; local closed-handle
+   * guards use `VelrStateError`.
+   */
   get closed(): boolean {
     return this.#closed;
   }
@@ -236,6 +300,7 @@ abstract class WorkerHandle {
     if (this.#closed) return;
     this.#closed = true;
     await this.rpc.call("handle.close", { handle: this.ref.id });
+    this.rpc.releaseQueryControls(this.ref.id);
   }
 
   /** Async dispose hook for JavaScript explicit resource management. */
@@ -262,7 +327,12 @@ function traceFromRef(rpc: WorkerRpc, ref: WorkerHandleRef): VelrWorkerExplainTr
  * ```
  *
  * The worker API mirrors the direct `Velr` API, but methods return promises and
- * native execution happens away from the caller's event loop.
+ * native execution happens away from the caller's event loop. Individual
+ * requests execute in order; an asynchronous transaction callback does not
+ * reserve the worker across its awaits. Use one transaction at a time and
+ * avoid unrelated calls on this connection until it finishes. Use separate
+ * worker connections for independent concurrent transaction scopes. Worker
+ * communication failures can reject calls with ordinary Node.js errors.
  */
 export class VelrWorker {
   /** Underlying Node.js worker thread. */
@@ -283,9 +353,11 @@ export class VelrWorker {
   /**
    * Open a database for reading and writing in a worker thread.
    *
-   * Pass `null` or omit `path` for an in-memory database. Sidecar-backed
-   * features such as fulltext and vector indexes require a file-backed
-   * database.
+   * Pass `null` or omit `path` for an in-memory database. File paths open or
+   * create a persistent database. Fulltext and vector indexes require a file.
+   * Opening never migrates automatically. Close the returned worker when all
+   * queries and results are finished; open failures reject with `VelrError`.
+   * Migrate supported older databases before graph queries or transactions.
    */
   static async open(path: string | null = null, options: VelrWorkerOptions = {}): Promise<VelrWorker> {
     const client = VelrWorker.#spawn(options);
@@ -315,7 +387,13 @@ export class VelrWorker {
     }
   }
 
-  /** Open an existing database in read-only mode in a worker thread. */
+  /**
+   * Open an existing supported database for reads without creating,
+   * initializing, migrating, or repairing it. Missing files or unsupported
+   * schemas reject with `VelrError`. Close the returned worker when finished.
+   * Migrate supported older databases on a writable connection, then reopen
+   * read-only workers before querying.
+   */
   static async openReadonly(path: string, options: VelrWorkerOptions = {}): Promise<VelrWorker> {
     const client = VelrWorker.#spawn(options);
     await client.#rpc.call("db.openReadonly", { path });
@@ -363,12 +441,21 @@ export class VelrWorker {
     return this.#rpc.call("db.needsMigration");
   }
 
-  /** Run any pending Velr schema migrations for this database. */
+  /**
+   * Explicitly migrate a writable database outside an active transaction.
+   * Resolves to the before/after versions, status, and applied steps; failures
+   * reject with `VelrError`. Opening a worker never migrates automatically.
+   * Migrate supported older databases before graph queries or transactions;
+   * reopen read-only workers after another connection migrates the file.
+   */
   async migrate(): Promise<MigrationReport> {
     return this.#rpc.call("db.migrate");
   }
 
-  /** Compact a writable, current-schema database file with Velr's maintenance vacuum. */
+  /**
+   * Compact a writable current-schema file outside an active transaction.
+   * Resolves without a value; unmet prerequisites reject with `VelrError`.
+   */
   async vacuum(): Promise<void> {
     await this.#rpc.call("db.vacuum");
   }
@@ -378,8 +465,24 @@ export class VelrWorker {
    *
    * Embedder-backed vector indexes reference this name from
    * `CREATE VECTOR INDEX ... OPTIONS { indexConfig: { embedder: 'name' } }`.
-   * The callback runs on the parent thread and may be asynchronous. Return one
-   * embedding for each input in the same order.
+   * Register it separately on each worker connection that needs embeddings,
+   * including after reopening; registration is not persisted with the file.
+   * Registration itself, index creation/recovery, indexed writes or their
+   * commit, and text queries through vector procedures can request embeddings.
+   * Register before those operations. If an embedder-backed index has pending
+   * transaction updates, commit or roll back before searching that index.
+   *
+   * The callback runs on the calling thread and may be asynchronous. Database
+   * work runs in the worker; CPU-intensive embedder code still blocks the
+   * calling thread unless the application offloads that computation. Return one
+   * finite embedding for each input in the same order and with the requested
+   * dimensions. The callback is retained until replacement or close. Do not
+   * call the same worker from its callback; doing so cannot complete while
+   * that worker waits for the callback. Callback failures fail the requesting
+   * query or index operation. Names must be nonempty and contain no NUL;
+   * invalid names or callbacks reject with `VelrTypeError`. Runtime support,
+   * registration, and index failures reject with `VelrError`; closed or
+   * invalidated workers may reject with an ordinary `Error` or `VelrStateError`.
    *
    * Stored-vector indexes, such as `CREATE VECTOR INDEX ... ON (n.embedding)`,
    * index the vector/list property directly and do not use a registered
@@ -410,9 +513,13 @@ export class VelrWorker {
     }
   }
 
-  /** Execute Cypher and return an async stream of result tables. */
-  async exec(cypher: string, options?: QueryOptions): Promise<VelrWorkerStream> {
-    const ref = await this.#rpc.call<WorkerHandleRef>("db.exec", { cypher, options });
+  /**
+   * Execute Cypher and return an async stream of result tables.
+   * Cancellation and deadlines apply through result fetching.
+   * Close the returned stream when finished.
+   */
+  async exec(cypher: string, options?: WorkerQueryOptions): Promise<VelrWorkerStream> {
+    const ref = await this.#rpc.query<WorkerHandleRef>("db.exec", cypher, options, true);
     return new VelrWorkerStream(this.#rpc, ref);
   }
 
@@ -420,20 +527,21 @@ export class VelrWorker {
    * Execute Cypher and return exactly one result table.
    *
    * The promise rejects when the statement produces no tables or multiple
-   * tables.
+   * tables. Cancellation and deadlines apply through result fetching.
+   * Close the returned table when finished.
    */
-  async execOne(cypher: string, options?: QueryOptions): Promise<VelrWorkerTable> {
-    const ref = await this.#rpc.call<WorkerHandleRef>("db.execOne", { cypher, options });
+  async execOne(cypher: string, options?: WorkerQueryOptions): Promise<VelrWorkerTable> {
+    const ref = await this.#rpc.query<WorkerHandleRef>("db.execOne", cypher, options, true);
     return tableFromRef(this.#rpc, ref);
   }
 
-  /** Execute Cypher and discard all result tables. */
-  async run(cypher: string, options?: QueryOptions): Promise<void> {
-    await this.#rpc.call("db.run", { cypher, options });
+  /** Execute Cypher and discard all result tables. Supports cancellation and deadlines. */
+  async run(cypher: string, options?: WorkerQueryOptions): Promise<void> {
+    await this.#rpc.query("db.run", cypher, options);
   }
 
   /** Alias for `run()`. */
-  async execute(cypher: string, options?: QueryOptions): Promise<void> {
+  async execute(cypher: string, options?: WorkerQueryOptions): Promise<void> {
     await this.run(cypher, options);
   }
 
@@ -453,7 +561,18 @@ export class VelrWorker {
    * Run a function inside a worker transaction.
    *
    * The transaction commits when `fn` resolves and rolls back when `fn` rejects,
-   * unless the callback has already committed or rolled back.
+   * unless the callback has already committed or rolled back. Resolves to the
+   * callback result and propagates its rejection or a transaction failure.
+   * Consume and close result handles before the callback finishes; copied cells,
+   * objects, and explain snapshots can outlive it. Only one transaction may be
+   * active on this connection. A writable transaction reserves the writer slot;
+   * use a separate read-only connection for a snapshot while another writes.
+   *
+   * The worker orders individual requests, not the entire callback scope. Do
+   * not start another transaction or send unrelated connection calls while
+   * this callback is pending. Await its result before reusing the connection,
+   * or use separate worker connections for independent work. Callback errors
+   * propagate unless rollback cleanup itself fails.
    */
   async transaction<T>(fn: (tx: VelrWorkerTx) => T | Promise<T>): Promise<T> {
     const tx = await this.beginTx();
@@ -474,27 +593,58 @@ export class VelrWorker {
    * Execute Cypher and convert the single result table into objects.
    *
    * Column names become object keys and cell conversion follows `Cell.asJs()`.
+   * Cancellation and deadlines apply to execution and collection.
    */
   async query<T extends Record<string, unknown> = Record<string, unknown>>(
     cypher: string,
-    options?: QueryOptions & CellAsJsOptions
+    options?: WorkerQueryOptions & CellAsJsOptions
   ): Promise<T[]> {
-    return this.#rpc.call<T[]>("db.query", { cypher, options });
+    return this.#rpc.query<T[]>("db.query", cypher, options);
   }
 
-  /** Build an explain trace without executing the query. */
+  /**
+   * Explain query text without executing it; accepts no parameter bindings or options.
+   *
+   * Keep this connection and the returned trace open until reading finishes,
+   * then close the trace. Closing the parent invalidates it. Copied `snapshot()`
+   * and `toCompactString()` results remain usable after handle closure.
+   * Query/runtime failures reject with `VelrError`, invalid host arguments with
+   * `VelrTypeError`; closed or invalidated worker handles may reject with an
+   * ordinary `Error` or `VelrStateError`.
+   */
   async explain(cypher: string): Promise<VelrWorkerExplainTrace> {
     const ref = await this.#rpc.call<WorkerHandleRef>("db.explain", { cypher });
     return traceFromRef(this.#rpc, ref);
   }
 
-  /** Execute the query and return an analyzed explain trace. */
+  /**
+   * Execute and profile query text, including its writes, and return a trace.
+   *
+   * Accepts no parameter bindings or query options. To discard analysis writes,
+   * use `VelrWorkerTx.explainAnalyze()` and roll back its transaction. Keep this
+   * connection and the returned trace open while reading, then close the trace.
+   * Copied snapshots and compact strings survive handle closure. Query/runtime
+   * failures reject with `VelrError`, invalid host arguments with `VelrTypeError`;
+   * closed or invalidated worker handles may reject with an ordinary `Error`
+   * or `VelrStateError`.
+   */
   async explainAnalyze(cypher: string): Promise<VelrWorkerExplainTrace> {
     const ref = await this.#rpc.call<WorkerHandleRef>("db.explainAnalyze", { cypher });
     return traceFromRef(this.#rpc, ref);
   }
 
-  /** Start an explicit transaction in the worker. */
+  /**
+   * Start this connection's single explicit transaction in the worker.
+   *
+   * A writable transaction reserves the writer slot. For a snapshot while
+   * another connection writes, begin a transaction on a separate read-only
+   * connection. Use transaction methods until finalization and close its results
+   * first. Commit persists writes; rollback or close discards uncommitted work.
+   * Keep the parent connection open. Use savepoints for nested scopes.
+   * An already-active transaction or begin failure rejects with `VelrError`;
+   * closed worker requests may reject with an ordinary `Error` or `VelrStateError`.
+   * Do not interleave unrelated calls or another transaction on this connection.
+   */
   async beginTx(): Promise<VelrWorkerTx> {
     const ref = await this.#rpc.call<WorkerHandleRef>("db.beginTx");
     return new VelrWorkerTx(this.#rpc, ref);
@@ -619,7 +769,9 @@ export class VelrWorkerStreamTx extends WorkerHandle implements AsyncIterable<Ve
 }
 
 /**
- * Result table handle returned by worker query APIs.
+ * Result table handle returned by worker query APIs. Close it when finished;
+ * keep its parent connection or transaction open, plus the producing stream
+ * for tables returned by `exec()`. Closing a parent invalidates its children.
  *
  * The methods mirror `Table`, but every operation crosses the worker boundary
  * and therefore returns a promise.
@@ -641,7 +793,15 @@ export class VelrWorkerTable extends WorkerHandle {
     return new VelrWorkerRows(this.rpc, ref);
   }
 
-  /** Visit every row in order and close the row cursor afterwards. */
+  /**
+   * Visit rows in order with `fn(row, zeroBasedIndex)` on the caller's thread.
+   *
+   * Each returned promise is awaited before fetching the next row. A callback
+   * throw or rejection stops iteration and rejects this call; fetch failures
+   * also reject. The temporary cursor closes on success or failure, while the
+   * caller still owns the table. A cleanup failure can replace an earlier error.
+   * Returned cells own their data and survive closing result handles.
+   */
   async forEachRow(fn: (row: readonly Cell[], index: number) => void | Promise<void>): Promise<void> {
     const rows = await this.rows();
     try {
@@ -658,7 +818,13 @@ export class VelrWorkerTable extends WorkerHandle {
   /**
    * Collect all rows into an array.
    *
-   * Without a mapper, each row is returned as a fresh `Cell[]`.
+   * Fetches the whole result before mapping; use `forEachRow()` for incremental
+   * processing. Without a mapper, each row is returned as a fresh `Cell[]`.
+   * A mapper receives cells and a zero-based index on the caller's thread;
+   * each returned promise is awaited in row order. Mapping exceptions or
+   * rejections stop mapping and reject this call; query/fetch failures also
+   * reject. All rows/output are materialized in memory. The caller still owns
+   * the table; copied cells and values survive closing it or its parents.
    */
   async collect<T = Cell[]>(map?: (row: readonly Cell[], index: number) => T | Promise<T>): Promise<T[]> {
     const rawRows = await this.call<WorkerCell[][]>("table.collect");
@@ -674,6 +840,9 @@ export class VelrWorkerTable extends WorkerHandle {
    * Convert all rows into objects keyed by column name.
    *
    * Cell values are converted using `Cell.asJs(options)` in the worker.
+   * Use unique result aliases; Cypher rejects duplicate result column names.
+   * The generic `T` does not validate runtime result shapes. All rows are
+   * collected in memory; query and fetch failures reject the promise.
    */
   async toObjects<T extends Record<string, unknown> = Record<string, unknown>>(
     options: CellAsJsOptions = {}
@@ -681,7 +850,19 @@ export class VelrWorkerTable extends WorkerHandle {
     return this.call<T[]>("table.toObjects", { options });
   }
 
-  /** Export this table as an Arrow IPC file/Feather v2 buffer. */
+  /**
+   * Export an owned Arrow IPC file/Feather v2 `Buffer`; no Arrow peer is needed.
+   *
+   * The buffer outlives this table and its parents. Export can materialize all
+   * rows and use memory proportional to the result. Types are inferred per
+   * result: numeric columns may be integer/floating-point; incompatible mixed
+   * kinds become strings. Lists, maps, nodes, relationships, and paths become
+   * JSON strings in UTF-8 columns, rather than nested Arrow arrays. Nulls remain null, and
+   * empty/all-null columns use UTF-8 strings. Inspect the exported schema.
+   * Runtime support, row-read, conversion, or export failures reject with
+   * `VelrError`. Closed or invalidated worker handles may reject with an
+   * ordinary `Error` or `VelrStateError`.
+   */
   async toArrowIpc(): Promise<Buffer> {
     return workerBufferToBuffer(await this.call<Uint8Array>("table.toArrowIpc"));
   }
@@ -690,6 +871,10 @@ export class VelrWorkerTable extends WorkerHandle {
    * Convert this table to an Apache Arrow table.
    *
    * Requires the optional `apache-arrow` peer dependency in the caller process.
+   * Uses the inferred schema and JSON-string conversion of `toArrowIpc()`.
+   * Keep the table and its parents open until the promise resolves; the
+   * returned Arrow table then owns its data independently. Missing dependencies
+   * and result export/conversion failures reject the promise.
    */
   async toArrowTable(): Promise<unknown> {
     const arrow = await import("apache-arrow");
@@ -722,8 +907,16 @@ export class VelrWorkerRows extends WorkerHandle implements AsyncIterable<Cell[]
 /**
  * Worker-backed explain or explain-analyze trace.
  *
- * Use indexed methods for lazy access or `snapshot()` to copy the full trace
- * into plain JavaScript objects.
+ * Keep this trace and its parent connection or transaction open while reading
+ * it, and close the trace when finished. Parent closure invalidates the live
+ * trace even when its local `closed` property remains false. Invalidated-worker
+ * requests may reject with an ordinary `Error`; local guards use `VelrStateError`,
+ * and runtime/read failures use `VelrError`.
+ *
+ * Indexed methods read individual entries; `snapshot()` copies the full trace
+ * into plain JavaScript objects. Copied snapshots, metadata, and compact strings
+ * survive handle closure. Explain output is diagnostic and may change between
+ * releases.
  */
 export class VelrWorkerExplainTrace extends WorkerHandle {
   /** Return the number of plans in this trace. */
@@ -785,11 +978,19 @@ export class VelrWorkerExplainTrace extends WorkerHandle {
  * Explicit transaction running inside a Velr worker.
  *
  * Create transactions with `VelrWorker.beginTx()` or `VelrWorker.transaction()`.
+ * Only one may be active on the connection. Finish its result handles before
+ * commit, rollback, or close; finalization invalidates its worker-side children
+ * without updating every child's local `closed` property. Avoid unrelated
+ * connection calls and overlapping transaction/savepoint scopes during awaits.
+ * Use separate worker connections for independent concurrent work.
  */
 export class VelrWorkerTx extends WorkerHandle {
-  /** Execute Cypher inside this transaction and return an async stream of result tables. */
-  async exec(cypher: string, options?: QueryOptions): Promise<VelrWorkerStreamTx> {
-    const ref = await this.call<WorkerHandleRef>("tx.exec", { cypher, options });
+  /**
+   * Execute Cypher inside this transaction and return an async stream of result tables.
+   * Cancellation and deadlines apply through result fetching. Close the stream when finished.
+   */
+  async exec(cypher: string, options?: WorkerQueryOptions): Promise<VelrWorkerStreamTx> {
+    const ref = await this.rpc.query<WorkerHandleRef>("tx.exec", cypher, options, true, this.ref.id);
     return new VelrWorkerStreamTx(this.rpc, ref);
   }
 
@@ -797,20 +998,21 @@ export class VelrWorkerTx extends WorkerHandle {
    * Execute Cypher inside this transaction and return exactly one result table.
    *
    * The promise rejects when the statement produces no tables or multiple
-   * tables.
+   * tables. Cancellation and deadlines apply through result fetching.
+   * Close the returned table when finished.
    */
-  async execOne(cypher: string, options?: QueryOptions): Promise<VelrWorkerTable> {
-    const ref = await this.call<WorkerHandleRef>("tx.execOne", { cypher, options });
+  async execOne(cypher: string, options?: WorkerQueryOptions): Promise<VelrWorkerTable> {
+    const ref = await this.rpc.query<WorkerHandleRef>("tx.execOne", cypher, options, true, this.ref.id);
     return tableFromRef(this.rpc, ref);
   }
 
-  /** Execute Cypher inside this transaction and discard all result tables. */
-  async run(cypher: string, options?: QueryOptions): Promise<void> {
-    await this.call("tx.run", { cypher, options });
+  /** Execute Cypher inside this transaction, supporting cancellation and deadlines. */
+  async run(cypher: string, options?: WorkerQueryOptions): Promise<void> {
+    await this.rpc.query("tx.run", cypher, options, false, this.ref.id);
   }
 
   /** Alias for `run()`. */
-  async execute(cypher: string, options?: QueryOptions): Promise<void> {
+  async execute(cypher: string, options?: WorkerQueryOptions): Promise<void> {
     await this.run(cypher, options);
   }
 
@@ -829,21 +1031,40 @@ export class VelrWorkerTx extends WorkerHandle {
 
   /**
    * Execute Cypher inside this transaction and convert one result table into objects.
+   * Cancellation and deadlines apply to execution and collection.
    */
   async query<T extends Record<string, unknown> = Record<string, unknown>>(
     cypher: string,
-    options?: QueryOptions & CellAsJsOptions
+    options?: WorkerQueryOptions & CellAsJsOptions
   ): Promise<T[]> {
-    return this.call<T[]>("tx.query", { cypher, options });
+    return this.rpc.query<T[]>("tx.query", cypher, options, false, this.ref.id);
   }
 
-  /** Build an explain trace inside this transaction without executing the query. */
+  /**
+   * Explain query text in this transaction without executing it.
+   *
+   * Accepts no parameter bindings or query options. Keep the trace, transaction,
+   * and connection open while reading; close the trace before finalization.
+   * Copied snapshots and compact strings remain usable afterward. Query/runtime
+   * failures reject with `VelrError`, invalid host arguments with `VelrTypeError`;
+   * closed or invalidated handles may reject with an ordinary `Error` or
+   * `VelrStateError`.
+   */
   async explain(cypher: string): Promise<VelrWorkerExplainTrace> {
     const ref = await this.call<WorkerHandleRef>("tx.explain", { cypher });
     return traceFromRef(this.rpc, ref);
   }
 
-  /** Execute the query inside this transaction and return an analyzed explain trace. */
+  /**
+   * Execute and profile query text in this transaction, including its writes.
+   *
+   * Changes remain part of this transaction; commit or roll back normally.
+   * Accepts no parameter bindings or query options. Keep the trace, transaction,
+   * and connection open while reading; close the trace before finalization.
+   * Copied snapshots and compact strings survive closure. Query/runtime failures
+   * reject with `VelrError`, invalid host arguments with `VelrTypeError`; closed
+   * or invalidated handles may reject with an ordinary `Error` or `VelrStateError`.
+   */
   async explainAnalyze(cypher: string): Promise<VelrWorkerExplainTrace> {
     const ref = await this.call<WorkerHandleRef>("tx.explainAnalyze", { cypher });
     return traceFromRef(this.rpc, ref);
@@ -924,18 +1145,32 @@ export class VelrWorkerTx extends WorkerHandle {
     await this.call("tx.releaseSavepoint", { name });
   }
 
-  /** Commit the transaction and close the transaction handle. */
+  /**
+   * Commit writes and close the transaction and its worker-side children.
+   *
+   * Marks this local handle closed before the request finishes, including if
+   * commit rejects. Repeated calls on this marked handle do nothing. Child
+   * local `closed` properties may remain false after invalidation.
+   */
   async commit(): Promise<void> {
     if (this.closed) return;
     this.markClosed();
     await this.rpc.call("tx.commit", { handle: this.ref.id });
+    this.rpc.releaseQueryControls(this.ref.id);
   }
 
-  /** Roll back the transaction and close the transaction handle. */
+  /**
+   * Discard uncommitted writes and close the transaction and its worker-side children.
+   *
+   * Marks this local handle closed before the request finishes, including if
+   * rollback rejects. Repeated calls on this marked handle do nothing. Child
+   * local `closed` properties may remain false after invalidation.
+   */
   async rollback(): Promise<void> {
     if (this.closed) return;
     this.markClosed();
     await this.rpc.call("tx.rollback", { handle: this.ref.id });
+    this.rpc.releaseQueryControls(this.ref.id);
   }
 }
 
@@ -954,14 +1189,28 @@ export class VelrWorkerSavepoint extends WorkerHandle {
     this.name = ref.name ?? null;
   }
 
-  /** Release this savepoint and keep changes made after it. */
+  /**
+   * Release this savepoint, keeping its changes pending in the transaction.
+   *
+   * Marks this local handle closed before the worker request finishes, including
+   * if release rejects. Repeated calls on this marked handle do nothing. Keep
+   * the parent transaction open; releasing an invalidated savepoint can reject
+   * with an ordinary `Error` or `VelrError`.
+   */
   async release(): Promise<void> {
     if (this.closed) return;
     this.markClosed();
     await this.rpc.call("savepoint.release", { handle: this.ref.id });
   }
 
-  /** Roll back changes made after this savepoint and consume the handle. */
+  /**
+   * Roll back changes made after this savepoint and release it.
+   *
+   * Marks this local handle closed before the worker request finishes, including
+   * if rollback rejects. Repeated calls on this marked handle do nothing. Keep
+   * the parent transaction open; an invalidated savepoint can reject with an
+   * ordinary `Error` or `VelrError`.
+   */
   async rollback(): Promise<void> {
     if (this.closed) return;
     this.markClosed();

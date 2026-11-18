@@ -11,6 +11,9 @@ import {
   Velr,
   VelrTx
 } from "../driver.js";
+import { VelrError } from "../errors.js";
+import { getBindings, type NativePointer, VelrCode } from "../ffi/koffi.js";
+import { borrowQueryControl, workerQueryControl } from "../query-control.js";
 import type { VectorEmbedder, VectorEmbedding } from "../types.js";
 
 type HandleKind = "stream" | "streamTx" | "table" | "rows" | "trace" | "tx" | "savepoint";
@@ -22,6 +25,7 @@ interface HandleEntry {
   readonly value: HandleValue;
   readonly parent: string | null;
   readonly children: Set<string>;
+  readonly queryControl: NativePointer;
 }
 
 interface RequestMessage {
@@ -34,6 +38,7 @@ let db: Velr | null = null;
 let nextHandleId = 0;
 let nextEmbedRequestId = 0;
 const handles = new Map<string, HandleEntry>();
+let activeQueryControl: NativePointer = null;
 
 if (!parentPort) {
   throw new Error("Velr worker must be started as a worker thread");
@@ -46,7 +51,9 @@ function requireDb(): Velr {
 
 function addHandle(kind: HandleKind, value: HandleValue, parent: string | null = null) {
   const id = `${kind}:${(nextHandleId += 1).toString(36)}`;
-  const entry: HandleEntry = { id, kind, value, parent, children: new Set() };
+  const entry: HandleEntry = {
+    id, kind, value, parent, children: new Set(), queryControl: activeQueryControl
+  };
   handles.set(id, entry);
   if (parent) handles.get(parent)?.children.add(id);
   return handleRef(entry);
@@ -132,8 +139,16 @@ function serializeError(err: unknown) {
   return { name: "Error", message: String(err) };
 }
 
+function checkActiveQuery(): void {
+  if (activeQueryControl === null) return;
+  const status = getBindings().lib.velr_query_control_status?.(activeQueryControl);
+  if (status === VelrCode.ECANCELLED) throw new VelrError("query cancelled", { code: status });
+  if (status === VelrCode.EDEADLINE) throw new VelrError("query deadline exceeded", { code: status });
+}
+
 function bridgeEmbedder(embedderId: string): VectorEmbedder {
   return (inputs) => {
+    checkActiveQuery();
     const inputCount = inputs.length;
     const dimensions = inputs[0]?.dimensions ?? 0;
     const control = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
@@ -154,9 +169,11 @@ function bridgeEmbedder(embedderId: string): VectorEmbedder {
       error
     });
 
-    const waitResult = Atomics.wait(status, 0, 0);
-    if (waitResult !== "ok" && waitResult !== "not-equal") {
-      throw new Error(`worker vector embedder wait failed: ${waitResult}`);
+    if (activeQueryControl === null) {
+      Atomics.wait(status, 0, 0);
+    } else {
+      while (Atomics.wait(status, 0, 0, 25) === "timed-out") checkActiveQuery();
+      checkActiveQuery();
     }
     if (Atomics.load(status, 0) !== 1) {
       throw new Error(readSharedError(new Uint8Array(error)));
@@ -353,11 +370,20 @@ function dispatchHandle(op: string, payload: any): unknown {
 }
 
 parentPort.on("message", (message: RequestMessage) => {
-  const { id, op, payload } = message;
+  const { id, op } = message;
+  const payload = message.payload ?? {};
   try {
-    const result = dispatch(op, payload ?? {});
+    if (payload.queryControl) {
+      activeQueryControl = borrowQueryControl(payload.queryControl);
+      payload.options = { ...payload.options, [workerQueryControl]: activeQueryControl };
+    } else if (payload.handle) {
+      activeQueryControl = handles.get(payload.handle)?.queryControl ?? null;
+    }
+    const result = dispatch(op, payload);
     parentPort!.postMessage({ id, result });
   } catch (err) {
     parentPort!.postMessage({ id, error: serializeError(err) });
+  } finally {
+    activeQueryControl = null;
   }
 });

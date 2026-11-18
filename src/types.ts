@@ -5,14 +5,16 @@ export type QueryScalar = null | boolean | number | bigint | string;
  * A JSON-like value accepted by Velr query parameters.
  *
  * Parameters may be nested arrays or objects. JavaScript `bigint` values are
- * passed to Velr as signed 64-bit integers.
+ * passed to Velr as signed 64-bit integers. Numbers must be finite; integer
+ * numbers must be safe integers. Values outside these ranges throw
+ * `VelrTypeError`. Parameters are bound separately from query text.
  */
 export type QueryValue =
   | QueryScalar
   | readonly QueryValue[]
   | { readonly [key: string]: QueryValue };
 
-/** Named query parameters passed to Cypher as `$name` values. */
+/** Named query parameters passed as `$name`; keys omit the leading `$`. */
 export type QueryParams = Record<string, QueryValue>;
 
 /** Options applied when creating a new database. */
@@ -23,8 +25,7 @@ export interface CreateOptions {
    * properties disabled. The choice applies to every relationship type and
    * is fixed at creation.
    *
-   * Integers, floating-point numbers, and strings up to 128 UTF-8 bytes can
-   * be inlined. All values use the same Cypher reads and writes.
+   * All values use the same Cypher reads and writes.
    */
   readonly inlineEdgeProperties?: readonly string[];
 }
@@ -32,20 +33,33 @@ export interface CreateOptions {
 /** Options accepted by query execution helpers. */
 export interface QueryOptions {
   /**
-   * Maximum number of rows Velr should return.
-   *
-   * `null` or `undefined` leaves the runtime default unchanged.
+   * Non-negative safe integer cap on rows per result table, including every
+   * table in a multi-statement script. `0` preserves columns without rows.
+   * `null` or `undefined` leaves the runtime default unchanged. Invalid values
+   * throw `VelrTypeError`. This does not cap execution time or replace Cypher
+   * `LIMIT` clauses.
    */
   readonly maxResultRows?: number | null;
   /** Named Cypher parameters available as `$name` in the query. */
   readonly params?: QueryParams | null;
+  /**
+   * Finite, non-negative query timeout in milliseconds. Omit it for no
+   * deadline; `0` expires immediately. It covers execution and subsequent
+   * table and row reads. Worker deadlines also include time waiting for
+   * earlier worker operations. A deadline error has `VelrError.stopReason`
+   * set to `"deadline_exceeded"`. Invalid or out-of-range durations throw
+   * `VelrTypeError` (or reject a worker call).
+   */
+  readonly timeoutMs?: number;
 }
 
 /**
  * Controls how signed 64-bit integer cells are converted by `Cell.asJs()`.
  *
  * `"number-or-bigint"` returns a JavaScript `number` when the value is inside
- * the safe integer range and a `bigint` otherwise.
+ * the safe integer range and a `bigint` otherwise. `"bigint"` and `"string"`
+ * always use the requested representation. `"number"` always converts to a
+ * number and can lose precision outside the safe integer range.
  */
 export type Int64Mode = "number-or-bigint" | "number" | "bigint" | "string";
 
@@ -53,7 +67,7 @@ export type Int64Mode = "number-or-bigint" | "number" | "bigint" | "string";
 export interface CellAsJsOptions {
   /** Integer conversion mode. Defaults to `"number-or-bigint"`. */
   readonly int64?: Int64Mode;
-  /** Parse JSON cells into JavaScript values. Defaults to `true`. */
+  /** Parse JSON cells with `JSON.parse`; JSON integers can lose precision. Defaults to `true`. */
   readonly parseJson?: boolean;
   /** Decode text and JSON cells as UTF-8 strings. Defaults to `true`. */
   readonly decodeText?: boolean;
@@ -170,7 +184,8 @@ export interface VectorEmbeddingInput {
 /**
  * One embedding vector returned by a vector embedder.
  *
- * The vector length must match `VectorEmbeddingInput.dimensions`.
+ * Every value must be finite; the vector length must match
+ * `VectorEmbeddingInput.dimensions`.
  */
 export type VectorEmbedding = readonly number[] | Float32Array;
 
@@ -180,7 +195,10 @@ export type VectorEmbedding = readonly number[] | Float32Array;
  *
  * Return one embedding for each input in the same order. The worker driver uses
  * `VelrWorkerVectorEmbedder`, which may return a promise.
- * Stored-vector indexes do not call this callback.
+ * Stored-vector indexes do not call this callback. Registration retains the
+ * callback until replacement or connection close. Do not call the same
+ * connection from inside its callback. Callback failures fail the query or
+ * index operation that requested the embeddings.
  */
 export type VectorEmbedder = (
   inputs: readonly VectorEmbeddingInput[]

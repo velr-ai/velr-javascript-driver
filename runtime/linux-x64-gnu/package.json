@@ -1,6 +1,6 @@
 {
   "name": "@velr-ai/runtime-linux-x64-gnu",
-  "version": "0.2.61",
+  "version": "0.2.62",
   "description": "Velr native runtime for Linux x64 GNU",
   "license": "LicenseRef-Velr-Runtime-Binary-Redistribution-License",
   "repository": {

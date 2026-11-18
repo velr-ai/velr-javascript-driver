@@ -18,7 +18,9 @@ export const enum VelrCode {
   EARG = -1,
   EUTF = -2,
   ESTATE = -3,
-  EERR = -4
+  EERR = -4,
+  ECANCELLED = -5,
+  EDEADLINE = -6
 }
 
 export const enum CellKind {
@@ -42,6 +44,15 @@ const enum StorageValueKind {
 }
 
 interface NativeLib {
+  readonly velr_query_control_new?: (timeoutNs: bigint) => NativePointer;
+  readonly velr_query_control_cancel?: (control: NativePointer) => void;
+  readonly velr_query_control_status?: (control: NativePointer) => number;
+  readonly velr_query_control_free?: (control: NativePointer) => void;
+  readonly velr_exec_start_with_control?: ControlledExec;
+  readonly velr_exec_one_with_control?: ControlledExec;
+  readonly velr_run_with_control?: ControlledRun;
+  readonly velr_tx_exec_start_with_control?: ControlledExec;
+  readonly velr_tx_run_with_control?: ControlledRun;
   readonly velr_string_free: (ptr: NativePointer) => void;
   readonly velr_free: (ptr: NativePointer, len: number | bigint) => void;
   readonly velr_open: (path: string | null, outDb: NativePointer[], outErr: NativePointer[]) => number;
@@ -420,6 +431,23 @@ interface NativeLib {
   ) => number;
 }
 
+type ControlledExec = (
+  owner: NativePointer,
+  cypher: string,
+  options: QueryOptionsRaw | null,
+  control: NativePointer,
+  result: NativePointer[],
+  error: NativePointer[]
+) => number;
+
+type ControlledRun = (
+  owner: NativePointer,
+  cypher: string,
+  options: QueryOptionsRaw | null,
+  control: NativePointer,
+  error: NativePointer[]
+) => number;
+
 export interface NativeBindings {
   readonly lib: NativeLib;
   readonly resolution: RuntimeResolution;
@@ -498,11 +526,13 @@ export interface ExplainStatementMetaRaw {
   sqlite_plan_count?: number | bigint;
 }
 
-let bindings: NativeBindings | null = null;
+// The direct and worker entry points can be separate bundles in the same isolate.
+// Share their Koffi types and symbols because Koffi registers type names per isolate.
+const bindingsKey = Symbol.for("@velr-ai/velr/native-bindings/v1");
+const bindingStore = globalThis as { [bindingsKey]?: NativeBindings };
 
 export function getBindings(): NativeBindings {
-  bindings ??= createBindings(resolveRuntime());
-  return bindings;
+  return bindingStore[bindingsKey] ??= createBindings(resolveRuntime());
 }
 
 function createBindings(resolution: RuntimeResolution): NativeBindings {
@@ -520,6 +550,7 @@ function createBindings(resolution: RuntimeResolution): NativeBindings {
   const velrStream = koffi.opaque("velr_stream");
   const velrTable = koffi.opaque("velr_table");
   const velrRows = koffi.opaque("velr_rows");
+  koffi.opaque("velr_query_control");
   const velrTx = koffi.opaque("velr_tx");
   const velrSavepoint = koffi.opaque("velr_sp");
   const velrStreamTx = koffi.opaque("velr_stream_tx");
@@ -661,6 +692,15 @@ function createBindings(resolution: RuntimeResolution): NativeBindings {
     velr_migration_report_clear: required("void velr_migration_report_clear(_Inout_ velr_migration_report *report)"),
     velr_exec_start: required("velr_code velr_exec_start(velr_db *db, const char *cypher, _Out_ velr_stream **out_stream, _Out_ void **out_err)"),
     velr_exec_start_with_options: optional("velr_code velr_exec_start_with_options(velr_db *db, const char *cypher, const velr_query_options *opts, _Out_ velr_stream **out_stream, _Out_ void **out_err)"),
+    velr_query_control_new: optional("velr_query_control *velr_query_control_new(uint64_t timeout_ns)"),
+    velr_query_control_cancel: optional("void velr_query_control_cancel(velr_query_control *control)"),
+    velr_query_control_status: optional("velr_code velr_query_control_status(const velr_query_control *control)"),
+    velr_query_control_free: optional("void velr_query_control_free(velr_query_control *control)"),
+    velr_exec_start_with_control: optional("velr_code velr_exec_start_with_control(velr_db *db, const char *cypher, const velr_query_options *opts, const velr_query_control *control, _Out_ velr_stream **out_stream, _Out_ void **out_err)"),
+    velr_exec_one_with_control: optional("velr_code velr_exec_one_with_control(velr_db *db, const char *cypher, const velr_query_options *opts, const velr_query_control *control, _Out_ velr_table **out_table, _Out_ void **out_err)"),
+    velr_run_with_control: optional("velr_code velr_run_with_control(velr_db *db, const char *cypher, const velr_query_options *opts, const velr_query_control *control, _Out_ void **out_err)"),
+    velr_tx_exec_start_with_control: optional("velr_code velr_tx_exec_start_with_control(velr_tx *tx, const char *cypher, const velr_query_options *opts, const velr_query_control *control, _Out_ velr_stream_tx **out_stream, _Out_ void **out_err)"),
+    velr_tx_run_with_control: optional("velr_code velr_tx_run_with_control(velr_tx *tx, const char *cypher, const velr_query_options *opts, const velr_query_control *control, _Out_ void **out_err)"),
     velr_run: required("velr_code velr_run(velr_db *db, const char *cypher, _Out_ void **out_err)"),
     velr_run_with_options: required("velr_code velr_run_with_options(velr_db *db, const char *cypher, const velr_query_options *opts, _Out_ void **out_err)"),
     velr_exec_one: required("velr_code velr_exec_one(velr_db *db, const char *cypher, _Out_ velr_table **out_table, _Out_ void **out_err)"),
@@ -737,6 +777,16 @@ export function ensureNoNul(value: string, what: string): void {
 
 export function outPtr(): NativePointer[] {
   return [null];
+}
+
+export function queryControlAddress(control: NativePointer): bigint {
+  return typeof control === "bigint" ? control : koffi.address(control);
+}
+
+export function queryControlFromAddress(address: bigint): NativePointer {
+  const pointer = Buffer.alloc(koffi.sizeof("uintptr_t"));
+  koffi.encode(pointer, "uintptr_t", address);
+  return koffi.decode(pointer, "velr_query_control *");
 }
 
 export function outInt(initial = 0): number[] {
@@ -1645,7 +1695,7 @@ export function registerVectorCallback(embedder: VectorEmbedder): NativePointer 
 }
 
 export function unregisterVectorCallback(ptr: NativePointer): void {
-  if (!isNullPointer(ptr)) koffi.unregister(ptr);
+  if (!isNullPointer(ptr)) koffi.unregister(ptr as bigint);
 }
 
 function decodeVectorInputs(ptr: NativePointer, count: number): VectorEmbeddingInput[] {

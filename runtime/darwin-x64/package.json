@@ -1,6 +1,6 @@
 {
   "name": "@velr-ai/runtime-darwin-x64",
-  "version": "0.2.61",
+  "version": "0.2.62",
   "description": "Velr native runtime for macOS x64",
   "license": "LicenseRef-Velr-Runtime-Binary-Redistribution-License",
   "repository": {

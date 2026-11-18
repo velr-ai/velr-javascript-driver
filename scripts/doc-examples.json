@@ -1,0 +1,254 @@
+{
+  "version": 1,
+  "documents": ["README.md", "GUIDE.md", "API.md"],
+  "typescriptConfiguration": "GUIDE.md#running-the-typescript-examples:1",
+  "sourceExamples": {
+    "examples/basic.ts": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "Grace", "age": 41}]]}]
+    },
+    "examples/fulltext.ts": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [{"$length": 2, "$arrayContains": [
+        {"node": {"properties": {"title": "Vector Search in Graphs"}}, "score": {"$number": {"min": 0}}},
+        {"node": {"properties": {"title": "Query Planning"}}, "score": {"$number": {"min": 0}}}
+      ]}]}]
+    },
+    "examples/vector.ts": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [{"$length": 2, "$arrayContains": [
+        {"node": {"properties": {"title": "Alpha Paper"}}, "score": {"$number": {"min": -1.000001, "max": 1.000001}}},
+        {"node": {"properties": {"title": "Beta Paper"}}, "score": {"$number": {"min": -1.000001, "max": 1.000001}}}
+      ]}]}]
+    }
+  },
+  "fences": {
+    "README.md#requirements-and-installation:1": {
+      "language": "sh", "kind": "installation", "reason": "Install the public driver package."
+    },
+    "README.md#requirements-and-installation:2": {
+      "language": "sh", "kind": "installation", "reason": "Install the optional Apache Arrow peer used by the tested Arrow examples."
+    },
+    "README.md#quick-start:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": ["Keanu Reeves", 1964]}]
+    },
+    "README.md#in-memory-persistent-and-read-only-databases:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "Alice"}]]}]
+    },
+    "README.md#database-creation-options:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [["weight"]]}]
+    },
+    "README.md#parameters-and-owned-values:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "Alice", "age": 42}]]}]
+    },
+    "README.md#multiple-result-tables-and-rows:1": {
+      "language": "js", "kind": "run",
+      "checks": [
+        {"kind": "output", "match": [["one"]]}, {"kind": "output", "match": [[1]]},
+        {"kind": "output", "match": [["two"]]}, {"kind": "output", "match": [[2]]}
+      ]
+    },
+    "README.md#row-caps-deadlines-and-cancellation:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"n": 1}, {"n": 2}, {"n": 3}]]}]
+    },
+    "README.md#commit-rollback-and-savepoints:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "Alice"}]]}]
+    },
+    "README.md#named-savepoints:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "Alice"}, {"name": "Grace"}]]}]
+    },
+    "README.md#handle-execution-and-fetch-errors:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "level": "error", "match": [{"$stringIncludes": "missing"}]}]
+    },
+    "README.md#run-asynchronously-and-cancel-work:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [{"$oneOf": [
+        {"$regex": "^(cancelled|deadline_exceeded)$"}, [{"total": 500000500000}]
+      ]}]}]
+    },
+    "README.md#fulltext-search:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"title": "Graph databases", "score": {"$number": {"min": 0}}}]]}]
+    },
+    "README.md#vector-search-and-embeddings:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"text": "Connected data", "score": {"$number": {"min": 0, "max": 1}}}]]}]
+    },
+    "README.md#compatible-procedure-calls:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"title": "Graph databases", "score": {"$number": {"min": 0}}}]]}]
+    },
+    "README.md#compatible-procedure-calls:2": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"text": "Connected data", "score": {"$number": {"min": 0.999, "max": 1.001}}}]]}]
+    },
+    "README.md#arrow-import-and-export:1": {
+      "language": "js", "kind": "run",
+      "checks": [
+        {"kind": "output", "match": [[{"name": "Alice", "age": 42}]]},
+        {"kind": "output", "match": [1, 2]}
+      ]
+    },
+    "README.md#graph-introspection-and-explain:1": {
+      "language": "js", "kind": "run",
+      "checks": [
+        {"kind": "output", "match": [[{"name": "paperText", "type": "FULLTEXT", "entityType": "NODE", "properties": ["title"]}]]},
+        {"kind": "output", "match": [[{"label": "Paper"}]]},
+        {"kind": "output", "match": [{"$arrayContains": [{"element_kind": "node_property", "element_name": "Paper", "property_name": "title"}]}]},
+        {"kind": "output", "match": [{"$stringIncludes": "Paper"}]}
+      ]
+    },
+    "README.md#compatibility-and-maintenance:1": {
+      "language": "js", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"remaining": 0}]]}]
+    },
+    "GUIDE.md#query-parameter-binding:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "Alice"}]]}]
+    },
+    "GUIDE.md#query-execution:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [["name", "age"]]}, {"kind": "output", "match": [[{"name": "Alice", "age": 42}]]}]
+    },
+    "GUIDE.md#streaming-multiple-result-tables:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"value": "first"}]]}, {"kind": "output", "match": [[{"value": "second"}]]}]
+    },
+    "GUIDE.md#worker-threads:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "background"}]]}, {"kind": "output", "match": [[{"status": "complete"}]]}]
+    },
+    "GUIDE.md#bounded-result-previews:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"n": 1}, {"n": 2}]]}, {"kind": "output", "match": [["name"], []]}]
+    },
+    "GUIDE.md#query-cancellation-and-timeouts:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"n": 1}]]}, {"kind": "output", "match": ["deadline_exceeded"]}]
+    },
+    "GUIDE.md#cancel-worker-queries:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": ["cancelled"]}]
+    },
+    "GUIDE.md#results-lifetimes-and-threads:1": {
+      "language": "ts", "kind": "run",
+      "checks": [
+        {"kind": "output", "match": ["bigint", "9007199254740993"]},
+        {"kind": "output", "match": [[{"id": "9007199254740993", "values": "[9007199254740993]"}]]}
+      ]
+    },
+    "GUIDE.md#read-rows-and-keep-owned-values:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [["Alice", 42]]}]
+    },
+    "GUIDE.md#scoped-savepoints:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "Alice"}]]}]
+    },
+    "GUIDE.md#named-savepoints:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "Alice"}, {"name": "Grace"}]]}]
+    },
+    "GUIDE.md#async-worker-transactions:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "queued"}]]}]
+    },
+    "GUIDE.md#candidate-filters-and-score-filters:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"text": "Graph guide", "score": {"$number": {"min": 0.999999, "max": 1}}}]]}]
+    },
+    "GUIDE.md#fulltext-analyzers-and-pagination:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [2]}]
+    },
+    "GUIDE.md#subqueries-and-relationship-indexes:1": {
+      "language": "ts", "kind": "run",
+      "checks": [
+        {"kind": "output", "match": [[{"term": "graph", "matches": 1}, {"term": "missing", "matches": 0}]]},
+        {"kind": "output", "match": [[{"note": "graph reference"}]]}
+      ]
+    },
+    "GUIDE.md#fulltext-search:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [["Graph databases"]]}]
+    },
+    "GUIDE.md#stored-vector-indexes-and-score-scales:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [
+        {"$number": {"min": 0.499999, "max": 0.500001}},
+        {"$number": {"min": -0.000001, "max": 0.000001}},
+        {"$number": {"min": 0.499999, "max": 0.500001}}
+      ]}]
+    },
+    "GUIDE.md#text-embeddings:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [["Graph databases"]], "count": 2}]
+    },
+    "GUIDE.md#async-worker-embedders:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [["Graph databases"]]}]
+    },
+    "GUIDE.md#arrow-ipc:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "Ada"}, {"name": "Grace"}]]}]
+    },
+    "GUIDE.md#convert-to-an-apache-arrow-table:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [1, 2]}]
+    },
+    "GUIDE.md#introspection:1": {
+      "language": "ts", "kind": "run",
+      "checks": [
+        {"kind": "output", "match": [[{"name": "personName", "type": "RANGE"}]]},
+        {"kind": "output", "match": [[{"label": "Person"}]]},
+        {"kind": "output", "match": [[{"relationshipType": "KNOWS"}]]},
+        {"kind": "output", "match": [[{"propertyKey": "age"}, {"propertyKey": "name"}, {"propertyKey": "weight"}]]},
+        {"kind": "output", "match": [["age", "name"]]}
+      ]
+    },
+    "GUIDE.md#explain-plans:1": {
+      "language": "ts", "kind": "run",
+      "checks": [
+        {"kind": "output", "match": [1, 1, "string"]}, {"kind": "output", "match": [1]},
+        {"kind": "output", "match": [[{"count": 1}]]}
+      ]
+    },
+    "GUIDE.md#opening-an-existing-database-read-only:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"name": "Alice"}]]}]
+    },
+    "GUIDE.md#database-creation-options:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [["timestamp"]]}, {"kind": "output", "match": [[{"timestamp": 1700000000}]]}]
+    },
+    "GUIDE.md#schema-migration:1": {
+      "language": "ts", "kind": "run",
+      "checks": [
+        {"kind": "output", "match": [11, 11, false]},
+        {"kind": "output", "match": ["already_current", 11, 11]},
+        {"kind": "output", "match": [["already_current"]]}
+      ]
+    },
+    "GUIDE.md#maintenance:1": {
+      "language": "ts", "kind": "run",
+      "checks": [{"kind": "output", "match": [[{"count": 1}]]}]
+    },
+    "GUIDE.md#running-the-typescript-examples:1": {
+      "language": "json", "kind": "configuration", "reason": "tsconfig.json for compiling the complete TypeScript programs; JSON is parsed and the runner compiles all TypeScript against public package exports."
+    },
+    "API.md#velr:1": {
+      "language": "ts", "kind": "import", "reason": "The direct-driver import example must compile and load the public root export; verbatim module syntax retains its value import during execution."
+    },
+    "API.md#velrworker:1": {
+      "language": "ts", "kind": "import", "reason": "The worker import example must compile and load the public worker export; verbatim module syntax retains its value import during execution."
+    }
+  }
+}
